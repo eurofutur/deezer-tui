@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::config::AudioQuality;
 
 const GATEWAY_URL: &str = "https://www.deezer.com/ajax/gw-light.php";
@@ -148,6 +148,25 @@ pub struct AlbumPage {
     pub artist_id: Option<String>,
     pub cover_url: Option<String>,
     pub tracks: Vec<(String, String, String)>,
+}
+
+/// Artwork and muted second line of a search result row, as on deezer.com.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchMeta {
+    pub picture_url: Option<String>,
+    pub subtitle: String,
+}
+
+/// Everything `deezer.pageSearch` returns that the player can open.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    pub tracks: Vec<(String, String, String)>,
+    pub playlists: Vec<(String, String)>,
+    pub artists: Vec<(String, String)>,
+    /// (album id, title, artist)
+    pub albums: Vec<(String, String, String)>,
+    /// Keyed "track:<id>", "playlist:<id>", "artist:<id>" or "album:<id>".
+    pub meta: HashMap<String, SearchMeta>,
 }
 
 /// A card of a Deezer web page (Home, Explore, a genre channel…).
@@ -1142,11 +1161,7 @@ impl DeezerClient {
     pub async fn fetch_search_results(
         &self,
         query: &str,
-    ) -> Result<(
-        Vec<(String, String, String)>,
-        Vec<(String, String)>,
-        Vec<(String, String)>,
-    )> {
+    ) -> Result<SearchResults> {
         let api_token = self
             .api_token
             .as_deref()
@@ -1193,6 +1208,7 @@ impl DeezerClient {
             return Err(anyhow!("search gateway error: {}", response["error"]));
         }
 
+        let mut meta = HashMap::new();
         let tracks = response["results"]["TRACK"]["data"]
             .as_array()
             .or_else(|| response["results"]["SONGS"]["data"].as_array())
@@ -1206,6 +1222,19 @@ impl DeezerClient {
                     .or_else(|| track["SNG_ID"].as_i64().map(|n| n.to_string()))?;
                 let title = track["SNG_TITLE"].as_str()?.to_owned();
                 let artist = track["ART_NAME"].as_str()?.to_owned();
+                let mut subtitle = artist.clone();
+                if let Some(album) = track["ALB_TITLE"].as_str().filter(|a| !a.is_empty()) {
+                    subtitle.push_str(" · ");
+                    subtitle.push_str(album);
+                }
+                let secs = num(&track["DURATION"]);
+                if secs > 0 {
+                    subtitle.push_str(&format!(" · {}:{:02}", secs / 60, secs % 60));
+                }
+                meta.insert(
+                    format!("track:{id}"),
+                    SearchMeta { picture_url: track["ALB_PICTURE"].as_str().and_then(|h| cover_url(h, 250)), subtitle },
+                );
                 Some((id, title, artist))
             })
             .collect();
@@ -1224,6 +1253,19 @@ impl DeezerClient {
                     .as_str()
                     .or(playlist["title"].as_str())?
                     .to_owned();
+                let kind = playlist["PICTURE_TYPE"].as_str().unwrap_or("playlist");
+                let mut subtitle = format!("{} tracks", num(&playlist["NB_SONG"]));
+                if let Some(owner) = playlist["PARENT_USERNAME"].as_str().filter(|o| !o.is_empty()) {
+                    subtitle.push_str(" · ");
+                    subtitle.push_str(owner);
+                }
+                meta.insert(
+                    format!("playlist:{id}"),
+                    SearchMeta {
+                        picture_url: playlist["PLAYLIST_PICTURE"].as_str().and_then(|h| picture_url(kind, h, 250)),
+                        subtitle,
+                    },
+                );
                 Some((id, title))
             })
             .collect();
@@ -1242,11 +1284,44 @@ impl DeezerClient {
                     .as_str()
                     .or(artist["name"].as_str())?
                     .to_owned();
+                meta.insert(
+                    format!("artist:{id}"),
+                    SearchMeta {
+                        picture_url: artist["ART_PICTURE"].as_str().and_then(|h| artist_picture_url(h, 250)),
+                        subtitle: format!("{} fans", crate::app::fmt_count(num(&artist["NB_FAN"]))),
+                    },
+                );
                 Some((id, name))
             })
             .collect();
 
-        Ok((tracks, playlists, artists))
+        let albums = response["results"]["ALBUM"]["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|album| {
+                let id = str_or_num(&album["ALB_ID"])?;
+                let title = album["ALB_TITLE"].as_str()?.to_owned();
+                let artist = album["ART_NAME"].as_str().unwrap_or_default().to_owned();
+                let mut subtitle = artist.clone();
+                let date = album["ORIGINAL_RELEASE_DATE"].as_str().or(album["PHYSICAL_RELEASE_DATE"].as_str());
+                if let Some(year) = date.and_then(|d| d.get(..4)) {
+                    subtitle.push_str(" · ");
+                    subtitle.push_str(year);
+                }
+                let count = num(&album["NUMBER_TRACK"]);
+                if count > 0 {
+                    subtitle.push_str(&format!(" · {count} tracks"));
+                }
+                meta.insert(
+                    format!("album:{id}"),
+                    SearchMeta { picture_url: album["ALB_PICTURE"].as_str().and_then(|h| cover_url(h, 250)), subtitle },
+                );
+                Some((id, title, artist))
+            })
+            .collect();
+
+        Ok(SearchResults { tracks, playlists, artists, albums, meta })
     }
 }
 

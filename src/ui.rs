@@ -30,6 +30,35 @@ pub struct ProtocolImage {
 pub const SIDEBAR_COVER_SLOT: usize = 0;
 pub const DETAIL_SLOT: usize = 1;
 pub const ARTIST_PHOTO_SLOT: usize = 2;
+/// Slots after the fixed ones hold card and thumbnail pictures, numbered by
+/// their place on screen so moving the focus does not redraw the others.
+const FIRST_LIST_SLOT: usize = ARTIST_PHOTO_SLOT + 1;
+pub const IMAGE_SLOTS: usize = 64;
+
+/// Real picture of `url` over `area`: sharpest text rendering underneath,
+/// laid over by the graphics protocol when the terminal has one.
+fn real_picture(
+    f: &mut ratatui::Frame<'_>,
+    app: &App,
+    url: &str,
+    area: Rect,
+    bg: Color,
+    circular: bool,
+    slot: usize,
+    protos: &mut Vec<ProtocolImage>,
+) {
+    let full = full_size_url(url);
+    let img = app.images.get(&full).or_else(|| app.images.get(url)).filter(|i| i.width() > 1);
+    if let Some(img) = img {
+        render_image_fine(f, img, area, bg, circular);
+    }
+    if app.true_images {
+        let png = protocol_png(app, &full).or_else(|| protocol_png(app, url));
+        if let Some((key, png)) = png.filter(|_| slot < IMAGE_SLOTS) {
+            protos.push(ProtocolImage { slot, key, rect: area, png });
+        }
+    }
+}
 
 /// PNG bytes (and identity key) for a full-size artwork url, when available.
 fn protocol_png(app: &App, full_url: &str) -> Option<(String, Arc<Vec<u8>>)> {
@@ -164,13 +193,14 @@ fn render_image_fine(f: &mut ratatui::Frame<'_>, img: &DynamicImage, area: Rect,
         Color::Rgb(r, g, b) => [r as f32, g as f32, b as f32],
         _ => [0.0, 0.0, 0.0],
     };
+    let outside = |x: u32, y: u32| -> bool {
+        let dx = (x as f32 + 0.5 - cx) / cx;
+        let dy = (y as f32 + 0.5 - cy) / cy;
+        circular && dx * dx + dy * dy > 1.0
+    };
     let sample = |x: u32, y: u32| -> [f32; 3] {
-        if circular {
-            let dx = (x as f32 + 0.5 - cx) / cx;
-            let dy = (y as f32 + 0.5 - cy) / cy;
-            if dx * dx + dy * dy > 1.0 {
-                return bg_rgb;
-            }
+        if outside(x, y) {
+            return bg_rgb;
         }
         let p = rgb.get_pixel(x, y);
         [p[0] as f32, p[1] as f32, p[2] as f32]
@@ -182,6 +212,12 @@ fn render_image_fine(f: &mut ratatui::Frame<'_>, img: &DynamicImage, area: Rect,
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(area.width as usize);
         for col in 0..area.width {
             let (x, y) = (col as u32 * 2, row as u32 * 2);
+            // Cells fully outside the circle keep the real background (it may
+            // be the terminal's own, which has no RGB value here).
+            if [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)].iter().all(|&(a, b)| outside(a, b)) {
+                spans.push(Span::styled(" ", Style::default().bg(bg)));
+                continue;
+            }
             let px = [sample(x, y), sample(x + 1, y), sample(x, y + 1), sample(x + 1, y + 1)];
             // Two most distant sub-pixels become the fg / bg seeds.
             let (mut a, mut b, mut best) = (0usize, 0usize, -1.0f32);
@@ -260,14 +296,16 @@ fn render_artwork(
     let area = square_in_cells(area);
     // Pixel look by default; while hovered, the real picture is laid over the
     // cells by the terminal's graphics protocol (or sharpened as text without one).
-    if hovered && app.true_images {
+    // The "pixel art on hover" setting swaps the two.
+    let real = hovered != app.config.pixel_on_hover;
+    if real && app.true_images {
         if let Some((key, png)) = full_url.and_then(|u| protocol_png(app, u)) {
             render_image(f, thumb, area, bg, circular);
             protos.push(ProtocolImage { slot, key, rect: area, png });
             return;
         }
     }
-    if hovered {
+    if real {
         let full = full_url.and_then(|u| {
             if app.now_playing.as_ref().and_then(|n| n.album_art_url.as_deref()) == Some(u) {
                 app.cover_art.as_ref()
@@ -424,6 +462,12 @@ pub fn render(
         .split(root[0]);
 
     let mut hits: Hits = Vec::new();
+    // One highlighted box at a time: a hovered search bar takes the frame
+    // (drawing only; the keyboard focus stays where it was).
+    let focused_panel = app.active_panel;
+    if app.search_hover {
+        app.active_panel = ActivePanel::Search;
+    }
     app.right_panel_visible = right_width > 0;
     if !app.right_panel_visible && app.active_panel == ActivePanel::Shortcuts {
         app.active_panel = ActivePanel::Main;
@@ -434,14 +478,20 @@ pub fn render(
         render_right_panel(f, app, workspace[2], &p, &mut hits, &mut protos);
     }
     render_player_bar(f, app, root[1], &p, &mut hits);
-    render_loading_popup(f, app, workspace[1], &p);
-    render_context_menu(f, app, &p, &mut hits);
+    // Terminal pictures sit above the text: drop those a popup would hide under.
+    let mut overlays = Vec::new();
+    render_loading_popup(f, app, workspace[1], &p, &mut overlays);
+    render_context_menu(f, app, &p, &mut hits, &mut overlays);
+    protos.retain(|img| !overlays.iter().any(|r| r.intersects(img.rect)));
+    if app.search_hover {
+        app.active_panel = focused_panel;
+    }
     app.clicks = hits;
     protos
 }
 
 /// Right-click / `m` menu for a track, drawn at the pointer.
-fn render_context_menu(f: &mut ratatui::Frame<'_>, app: &App, p: &Palette, hits: &mut Hits) {
+fn render_context_menu(f: &mut ratatui::Frame<'_>, app: &App, p: &Palette, hits: &mut Hits, overlays: &mut Vec<Rect>) {
     let Some(menu) = app.context_menu.as_ref() else { return };
     let items = app.menu_items();
     if items.is_empty() {
@@ -463,6 +513,7 @@ fn render_context_menu(f: &mut ratatui::Frame<'_>, app: &App, p: &Palette, hits:
     let x = menu.x.min(screen.width.saturating_sub(width));
     let y = menu.y.min(screen.height.saturating_sub(height));
     let rect = Rect { x, y, width, height };
+    overlays.push(rect);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .title(Span::styled(format!(" {title} "), Style::default().fg(p.muted)))
@@ -495,7 +546,7 @@ fn render_context_menu(f: &mut ratatui::Frame<'_>, app: &App, p: &Palette, hits:
 
 /// Small centered popup while a request is in flight. Appears after a short
 /// delay so cache hits and fast answers never flash it.
-fn render_loading_popup(f: &mut ratatui::Frame<'_>, app: &App, area: Rect, p: &Palette) {
+fn render_loading_popup(f: &mut ratatui::Frame<'_>, app: &App, area: Rect, p: &Palette, overlays: &mut Vec<Rect>) {
     let Some((label, started)) = &app.loading else { return };
     let elapsed = started.elapsed().as_millis();
     if elapsed < 120 {
@@ -510,6 +561,7 @@ fn render_loading_popup(f: &mut ratatui::Frame<'_>, app: &App, area: Rect, p: &P
         width,
         height: 5,
     };
+    overlays.push(rect);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -547,7 +599,7 @@ fn render_sidebar(
     let sidebar = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Length(12),
             Constraint::Ratio(playlists_pct as u32, 100),
             Constraint::Ratio(queue_pct as u32, 100),
@@ -564,9 +616,10 @@ fn render_sidebar(
         let now_key = app.now_playing.as_ref().map(|n| n.id.clone());
         let cover_url = app.now_playing.as_ref().and_then(|n| n.album_art_url.clone());
         let hovered = cover_url.is_some() && app.image_preview == cover_url;
-        match (&app.cover_art, hovered, app.true_images, app.cover_art_png.clone(), now_key) {
+        let real = hovered != app.config.pixel_on_hover;
+        match (&app.cover_art, real, app.true_images, app.cover_art_png.clone(), now_key) {
             (Some(img), true, true, Some(png), Some(key)) => {
-                // Pixel art underneath, real picture laid over it while hovered.
+                // Pixel art underneath, real picture laid over it.
                 render_image(f, img, img_area, p.bg, false);
                 protos.push(ProtocolImage { slot: SIDEBAR_COVER_SLOT, key, rect: img_area, png });
             }
@@ -584,7 +637,8 @@ fn render_sidebar(
 
     // Wordmark
     // Hovering the wordmark lights it up; clicking it toggles Matugen / Deezer.
-    let logo_rect = Rect { x: sidebar[0].x, y: sidebar[0].y, width: 11.min(sidebar[0].width), height: 1 };
+    // Logo on the search text's row, nav box top on the main panel's top.
+    let logo_rect = Rect { x: sidebar[0].x, y: sidebar[0].y + 1, width: 11.min(sidebar[0].width), height: 1 };
     let (mark_style, text_style) = if app.logo_hover {
         let on_white = Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD);
         (on_white, on_white)
@@ -599,7 +653,7 @@ fn render_sidebar(
             muted(p),
         ),
     ]));
-    f.render_widget(logo, sidebar[0]);
+    f.render_widget(logo, Rect { y: logo_rect.y, height: 1, ..sidebar[0] });
     hit(hits, logo_rect, Hit::Logo);
 
     // Navigation: Home / Explore, then the library, then settings.
@@ -747,7 +801,7 @@ fn render_main(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Palett
         ])
     };
     f.render_widget(
-        Paragraph::new(search_line).block(panel(None, search_active, p).padding(Padding::new(1, 1, 0, 0))),
+        Paragraph::new(search_line).block(panel(None, search_active || app.search_hover, p).padding(Padding::new(1, 1, 0, 0))),
         sections[0],
     );
 
@@ -759,13 +813,13 @@ fn render_main(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Palett
     if app.viewing_settings {
         render_settings(f, app, content, p, main_active, hits);
     } else if app.browse.is_some() {
-        render_browse(f, app, content, p, main_active, hits);
+        render_browse(f, app, content, p, main_active, hits, protos);
     } else if app.viewing_artist {
         render_artist(f, app, content, p, main_active, hits, protos);
     } else if let Some(view) = app.library_view {
         render_library(f, app, view, content, p, main_active, hits);
     } else if app.showing_search_results {
-        render_search_results(f, app, content, p, main_active, hits);
+        render_search_results(f, app, content, p, main_active, hits, protos);
     } else if !app.current_tracks.is_empty() {
         render_track_list(f, app, content, p, main_active, hits);
     } else {
@@ -798,13 +852,13 @@ fn split_header_body(f: &mut ratatui::Frame<'_>, area: Rect, header_height: u16,
 }
 
 /// Narrowest card; the web shows about seven per row on a wide window.
-const CARD_MIN_WIDTH: u16 = 20;
+const CARD_MIN_WIDTH: u16 = 14;
 const CARD_GAP: u16 = 2;
 
 /// A web page (Home, Explore, a genre, "See all") laid out like deezer.com:
 /// stacked sections, each a carousel of cover cards (or a wrapped grid),
 /// with "See all" and ‹ › next to the section title.
-fn render_browse(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Palette, active: bool, hits: &mut Hits) {
+fn render_browse(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Palette, active: bool, hits: &mut Hits, protos: &mut Vec<ProtocolImage>) {
     let Some(page) = app.browse.take() else { return };
     let frame = panel(None, active, p).padding(Padding::new(2, 2, 1, 0));
     let inner = frame.inner(area);
@@ -865,13 +919,16 @@ fn render_browse(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Pale
     }
 
     app.browse_visible.clear();
+    let mut slot = FIRST_LIST_SLOT;
     for &(s, first, ry, rh, heading) in &rows {
-        // Only rows that fit entirely: pixel-art covers cannot be cut.
-        if ry < scroll || ry + rh > scroll + inner.height {
+        // Rows cut at the top are skipped; the last one may be cut at the
+        // bottom, like the web page peeking at the next section.
+        if ry < scroll || ry >= scroll + inner.height {
             continue;
         }
         let section = &page.sections[s];
         let mut y = inner.y + ry - scroll;
+        let bottom = inner.y + inner.height;
         if heading {
             let line = Rect { x: inner.x, y, width: inner.width, height: 1 };
             let title_w = section.title.chars().count() as u16;
@@ -897,12 +954,18 @@ fn render_browse(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Pale
             }
             y += 2;
         }
+        let full_h = rh - if heading { 3 } else { 1 };
+        let is_tile = section.items.iter().all(|i| i.kind == "channel");
+        // Pixel-art pictures cannot be cut: a card shows once its picture fits.
+        if y >= bottom || bottom - y < if is_tile { full_h } else { img_h } {
+            continue;
+        }
         for (col, item) in section.items.iter().enumerate().skip(first).take(cols_us) {
             let rect = Rect {
                 x: inner.x + (col - first) as u16 * (card_w + CARD_GAP),
                 y,
                 width: card_w,
-                height: rh - if heading { 3 } else { 1 },
+                height: full_h.min(bottom - y),
             };
             let selected = active && (s, col) == app.browse_sel;
             if let Some(url) = &item.picture_url {
@@ -913,6 +976,12 @@ fn render_browse(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Pale
                 draw_channel_tile(f, item, img, rect, selected, p);
             } else {
                 draw_card(f, item, img, rect, img_h, selected, p);
+                // Setting "pixel art on hover": real pictures except under focus.
+                if let Some(url) = item.picture_url.as_deref().filter(|_| app.config.pixel_on_hover && !selected) {
+                    let cover = Rect { height: img_h, ..rect };
+                    real_picture(f, app, url, cover, p.bg, item.kind == "artist", slot, protos);
+                }
+                slot += 1;
             }
             hit(hits, rect, Hit::BrowseItem { section: s, item: col });
         }
@@ -939,27 +1008,31 @@ fn draw_card(
     if selected {
         f.render_widget(
             Paragraph::new("▀".repeat(rect.width as usize)).style(Style::default().fg(p.accent)),
-            Rect { y: cover.y + img_h, height: 1, ..rect },
+            Rect { y: cover.y + img_h, height: 1, ..rect }.intersection(rect),
         );
     }
     let title_style = if selected { Style::default().fg(p.accent).add_modifier(Modifier::BOLD) } else { bold(p) };
     let mut y = cover.y + img_h + 1;
-    let title_lines = if item.subtitle.is_empty() { 3 } else { 2 };
+    // Short titles take one line so the subtitle sits right under, as on the web.
+    let max_title = if item.subtitle.is_empty() { 3 } else { 2 };
+    let title_lines = if item.title.chars().count() as u16 <= rect.width { 1 } else { max_title };
     f.render_widget(
         Paragraph::new(Span::styled(item.title.clone(), title_style)).wrap(Wrap { trim: true }),
-        Rect { y, height: title_lines, ..rect },
+        Rect { y, height: title_lines, ..rect }.intersection(rect),
     );
     y += title_lines;
     // Without a release date the subtitle ("With …", "80 tracks - …") gets two lines.
     let sub_h = if item.released.is_empty() { 2 } else { 1 };
     f.render_widget(
         Paragraph::new(Span::styled(item.subtitle.clone(), muted(p))).wrap(Wrap { trim: true }),
-        Rect { y, height: sub_h.min(item.subtitle.len() as u16), ..rect },
+        Rect { y, height: sub_h.min(item.subtitle.len() as u16), ..rect }.intersection(rect),
     );
     y += sub_h;
     let mut lines = Vec::new();
     if !item.released.is_empty() {
-        lines.push(Line::from(Span::styled(format!("Released {}", item.released), muted(p))));
+        let label = format!("Released {}", item.released);
+        let label = if label.chars().count() as u16 <= rect.width { label } else { item.released.clone() };
+        lines.push(Line::from(Span::styled(label, muted(p))));
     }
     if item.explicit {
         lines.push(Line::from(Span::styled(" EXPLICIT ", Style::default().fg(p.muted).bg(p.surface))));
@@ -1043,6 +1116,7 @@ fn render_settings(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Pa
         format!("Quality: {}", quality_label(app.config.default_quality)),
         format!("Discord Rich Presence: {}", on_off(app.discord_rpc_enabled)),
         format!("Resume on start: {}", on_off(app.config.resume_on_start)),
+        format!("[{}] Real artworks, pixel art on hover", if app.config.pixel_on_hover { "x" } else { " " }),
         "Set ARL from the search box".to_string(),
         match &app.update {
             Some(r) => format!("Install update {} (v{} now)", r.tag_name, env!("CARGO_PKG_VERSION")),
@@ -1163,9 +1237,13 @@ fn render_track_list(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &
     }
 }
 
-fn render_search_results(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Palette, active: bool, hits: &mut Hits) {
+/// Height of a search result row: thumbnail beside title and subtitle.
+const SEARCH_ROW_HEIGHT: u16 = 2;
+
+fn render_search_results(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Palette, active: bool, hits: &mut Hits, protos: &mut Vec<ProtocolImage>) {
     let categories = [
         (SearchCategory::Tracks, "Tracks"),
+        (SearchCategory::Albums, "Albums"),
         (SearchCategory::Playlists, "Playlists"),
         (SearchCategory::Artists, "Artists"),
     ];
@@ -1188,8 +1266,9 @@ fn render_search_results(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, 
             Line::from(Span::styled(format!("Results for “{}”", app.search_query), bold(p))),
             Line::from(Span::styled(
                 format!(
-                    "{} tracks · {} playlists · {} artists",
+                    "{} tracks · {} albums · {} playlists · {} artists",
                     app.current_tracks.len(),
+                    app.search_albums.len(),
                     app.search_playlists.len(),
                     app.search_artists.len()
                 ),
@@ -1206,57 +1285,114 @@ fn render_search_results(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, 
         .flat_map(|(cat, label)| [(label.chars().count() as u16, Some(Hit::SearchCategory(*cat))), (4, None)])
         .collect();
     register_spans(hits, tab_line, hi.x, &parts);
-    let items: Vec<ListItem> = match app.search_category {
-        SearchCategory::Tracks => {
-            let mut items = vec![play_all_row("Play all results", p)];
-            items.extend(
-                app.current_tracks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (_, title, artist))| track_row(Some(i + 1), title, artist, None, p)),
-            );
-            items
-        }
+    // Deezer-style rows: small artwork on the left, title over a muted line.
+    let thumb = square_in_cells(Rect { x: 0, y: 0, width: 8, height: SEARCH_ROW_HEIGHT });
+    let text_x = 1 + thumb.width + 2;
+    let meta = |key: String| app.search_meta.get(&key).cloned().unwrap_or_default();
+    // (thumbnail key, title, subtitle) per row; None for the "Play all" row.
+    let rows: Vec<Option<(String, String, String)>> = match app.search_category {
+        SearchCategory::Tracks => std::iter::once(None)
+            .chain(app.current_tracks.iter().map(|(id, title, artist)| {
+                let key = format!("track:{id}");
+                let sub = Some(meta(key.clone()).subtitle).filter(|s| !s.is_empty()).unwrap_or_else(|| artist.clone());
+                Some((key, title.clone(), sub))
+            }))
+            .collect(),
+        SearchCategory::Albums => app
+            .search_albums
+            .iter()
+            .map(|(id, title, _)| {
+                let key = format!("album:{id}");
+                Some((key.clone(), title.clone(), meta(key).subtitle))
+            })
+            .collect(),
         SearchCategory::Playlists => app
             .search_playlists
             .iter()
-            .map(|(_, title)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(" ≡  ", Style::default().fg(p.accent)),
-                    Span::styled(title.clone(), Style::default().fg(p.fg)),
-                ]))
+            .map(|(id, title)| {
+                let key = format!("playlist:{id}");
+                Some((key.clone(), title.clone(), meta(key).subtitle))
             })
             .collect(),
         SearchCategory::Artists => app
             .search_artists
             .iter()
-            .map(|(_, name)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(" ◯  ", Style::default().fg(p.accent)),
-                    Span::styled(name.clone(), Style::default().fg(p.fg)),
-                ]))
+            .map(|(id, name)| {
+                let key = format!("artist:{id}");
+                Some((key.clone(), name.clone(), meta(key).subtitle))
             })
             .collect(),
     };
+    let pad = " ".repeat(text_x as usize);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| match row {
+            None => play_all_row("Play all results", p),
+            Some((_, title, sub)) => ListItem::new(vec![
+                Line::from(vec![Span::raw(pad.clone()), Span::styled(title.clone(), Style::default().fg(p.fg))]),
+                Line::from(vec![Span::raw(pad.clone()), Span::styled(sub.clone(), muted(p))]),
+            ]),
+        })
+        .collect();
+    app.search_visible.clear();
     if items.is_empty() {
         f.render_widget(
             Paragraph::new(" No results in this category").style(muted(p)).block(plain(p)),
             body,
         );
     } else {
-        let heights = vec![1u16; items.len()];
+        let heights: Vec<u16> = rows.iter().map(|r| if r.is_some() { SEARCH_ROW_HEIGHT } else { 1 }).collect();
         let block = plain(p);
         let inner = block.inner(body);
         let list = List::new(items).highlight_style(row_highlight(p)).block(block);
         f.render_stateful_widget(list, body, &mut app.main_state);
         let is_tracks = app.search_category == SearchCategory::Tracks;
-        let rows = register_rows(hits, inner, &app.main_state, &heights, &|i| {
+        let shown = register_rows(hits, inner, &app.main_state, &heights, &|i| {
             Some(Hit::MainRow { index: i, opens: !is_tracks || i == 0 })
         });
-        if is_tracks {
-            for (idx, rect) in rows {
-                if let Some((id, title, artist)) = idx.checked_sub(1).and_then(|i| app.current_tracks.get(i)) {
-                    register_track_spans(hits, rect, true, title, artist, id);
+        let selected = app.main_state.selected();
+        let highlight_bg = row_highlight(p).bg.unwrap_or(p.bg);
+        for (idx, rect) in shown {
+            let Some(Some((key, title, sub))) = rows.get(idx) else { continue };
+            let url = app.search_meta.get(key).and_then(|m| m.picture_url.clone());
+            // Only whole rows: a pixel-art thumbnail cannot be cut.
+            if rect.height >= SEARCH_ROW_HEIGHT {
+                let area = Rect { x: rect.x + 1, y: rect.y, width: thumb.width.min(rect.width), height: thumb.height };
+                let bg = if selected == Some(idx) { highlight_bg } else { p.bg };
+                let round = key.starts_with("artist:");
+                match url.as_ref().and_then(|u| app.images.get(u)).filter(|i| i.width() > 1) {
+                    // Setting "pixel art on hover": real pictures, pixels on the focused row.
+                    Some(_) if app.config.pixel_on_hover && selected != Some(idx) => {
+                        let slot = FIRST_LIST_SLOT + idx - app.main_state.offset();
+                        real_picture(f, app, url.as_deref().unwrap_or_default(), area, bg, round, slot, protos)
+                    }
+                    Some(img) if app.config.pixel_on_hover => render_image(f, img, area, bg, round),
+                    Some(img) => render_image_fine(f, img, area, bg, round),
+                    None => f.render_widget(Block::default().style(Style::default().bg(p.surface)), area),
+                }
+            }
+            if let Some(url) = url {
+                app.search_visible.push(url);
+            }
+            if let Some(track_id) = key.strip_prefix("track:") {
+                // Title opens the album; on the second line the artist opens
+                // the artist page and the rest (album · duration) the album.
+                let artist = app.current_tracks.get(idx - 1).map(|t| t.2.clone()).unwrap_or_default();
+                let line = |dy: u16| Rect { y: rect.y + dy, height: 1, ..rect };
+                register_spans(hits, line(0), rect.x + text_x, &[(title.chars().count() as u16, Some(Hit::TrackAlbum(track_id.to_owned())))]);
+                if rect.height >= 2 && sub.starts_with(&artist) {
+                    let artist_len = artist.chars().count() as u16;
+                    let rest = sub.chars().count() as u16 - artist_len;
+                    register_spans(
+                        hits,
+                        line(1),
+                        rect.x + text_x,
+                        &[
+                            (artist_len, Some(Hit::TrackArtist(track_id.to_owned()))),
+                            (3, None),
+                            (rest.saturating_sub(3), Some(Hit::TrackAlbum(track_id.to_owned()))),
+                        ],
+                    );
                 }
             }
         }

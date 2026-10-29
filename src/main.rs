@@ -28,7 +28,7 @@ use base64::Engine;
 use app::{ActivePanel, App, ArtistRow, Command, Hit, LibraryView, NowPlaying, RepeatMode, SearchCategory, UiEvent, ViewState};
 use std::collections::VecDeque;
 use config::{AudioQuality, Config, Theme};
-use api::{AlbumPage, ArtistPage, ArtistRef, BrowsePage, HistoryEntry, LibraryAlbum};
+use api::{AlbumPage, ArtistPage, ArtistRef, BrowsePage, HistoryEntry, LibraryAlbum, SearchResults};
 use std::collections::HashMap;
 use std::sync::Arc;
 use state::PlaybackState;
@@ -179,7 +179,7 @@ struct UeberzugppLayer {
     stdin: ChildStdin,
 }
 
-const IMAGE_SLOTS: usize = 3;
+use ui::IMAGE_SLOTS;
 
 fn slot_identifier(slot: usize) -> String {
     format!("deezer-tui-{slot}")
@@ -240,6 +240,21 @@ fn write_cover_png_temp(png: &[u8], slot: usize) -> io::Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("deezer-tui-image-{slot}.png"));
     fs::write(&path, png)?;
     Ok(path)
+}
+
+/// Transparent outside the inscribed circle.
+fn round_picture(img: &image::DynamicImage) -> image::DynamicImage {
+    let mut rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    for (x, y, px) in rgba.enumerate_pixels_mut() {
+        let dx = (x as f32 + 0.5 - cx) / cx;
+        let dy = (y as f32 + 0.5 - cy) / cy;
+        if dx * dx + dy * dy > 1.0 {
+            px[3] = 0;
+        }
+    }
+    image::DynamicImage::ImageRgba8(rgba)
 }
 
 fn kitty_delete_image(image_id: u32) -> io::Result<()> {
@@ -416,6 +431,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         app.resume_done = true;
     }
+    // Always open on Home, like the web app.
+    let _ = app.command_sender.send(Command::LoadPage("home".into()));
     let discord_rpc = DiscordRpcHandle::new();
 
     // Spawn task to fetch user playlists on startup
@@ -560,7 +577,7 @@ async fn run_tui_loop(
     };
     let kitty_image_id: u32 = 1337;
     // Per slot: what is currently drawn (key + rect), to redraw only on change.
-    let mut drawn_images: [Option<(String, u16, u16, u16, u16)>; IMAGE_SLOTS] = Default::default();
+    let mut drawn_images: Vec<Option<(String, u16, u16, u16, u16)>> = vec![None; IMAGE_SLOTS];
     let mut force_full_redraw = true;
     // Channel for background cover-art downloads.
     let (cover_tx, mut cover_rx) =
@@ -811,6 +828,7 @@ async fn run_tui_loop(
             app.pending_images.remove(&url);
             if app.images.len() > 200 {
                 app.images.clear();
+                app.images_png.clear();
             }
             // A failed download gets a 1x1 placeholder so it is not retried every tick.
             app.images.insert(url, img.unwrap_or_else(|| image::DynamicImage::new_rgb8(1, 1)));
@@ -850,6 +868,8 @@ async fn run_tui_loop(
                     continue;
                 }
                 if let Some(img) = app.images.get(&url).filter(|i| i.width() > 1) {
+                    // Artist photos are round, as on the web.
+                    let img = if url.contains("/images/artist/") { round_picture(img) } else { img.clone() };
                     let mut png = Vec::new();
                     let mut cursor = io::Cursor::new(&mut png);
                     if img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
@@ -865,7 +885,7 @@ async fn run_tui_loop(
         })?;
 
         if use_true_image_protocol {
-            let mut seen = [false; IMAGE_SLOTS];
+            let mut seen = vec![false; IMAGE_SLOTS];
             for img in &protocol_images {
                 if img.slot >= IMAGE_SLOTS {
                     continue;
@@ -936,7 +956,7 @@ async fn run_tui_loop(
                     let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
                     force_full_redraw = true;
                     // A re-attached terminal never saw the images: send them again.
-                    drawn_images = Default::default();
+                    drawn_images = vec![None; IMAGE_SLOTS];
                 }
                 _ => {}
             }
@@ -958,15 +978,17 @@ async fn run_tui_loop(
                         // M: track menu for the selected row (same as right-click).
                         KeyCode::Char('M') if !in_search => {
                             if let Some(track) = app.selected_track() {
-                                let in_queue = app.active_panel == ActivePanel::Queue;
+                                let on_player = app.player_track_focused();
+                                let in_queue = !on_player && app.active_panel == ActivePanel::Queue;
                                 let queue_pos = if in_queue { app.queue_state.selected() } else { None };
                                 let selected = app.main_state.selected();
                                 let anchor = app
                                     .clicks
                                     .iter()
                                     .find(|c| match c.hit {
+                                        Hit::NowPlaying => on_player,
                                         Hit::QueueItem(i) => in_queue && Some(i) == queue_pos,
-                                        Hit::MainRow { index, .. } => !in_queue && Some(index) == selected,
+                                        Hit::MainRow { index, .. } => !on_player && !in_queue && Some(index) == selected,
                                         _ => false,
                                     })
                                     .map(|c| (c.rect.x + 6, c.rect.y + 1));
@@ -1032,10 +1054,7 @@ async fn run_tui_loop(
                         // a / e: artist / album of the focused track — the one playing when
                         // the player has focus, otherwise the one selected in the focused list.
                         KeyCode::Char(c @ ('a' | 'e')) if !app.is_searching => {
-                            let player_focused = matches!(
-                                app.active_panel,
-                                ActivePanel::Player | ActivePanel::PlayerProgress | ActivePanel::PlayerInfo
-                            );
+                            let player_focused = app.player_track_focused();
                             let track_id = if player_focused {
                                 app.now_playing.as_ref().map(|n| n.id.clone())
                             } else {
@@ -1355,6 +1374,15 @@ async fn run_tui_loop(
                                                     };
                                                 }
                                                 5 => {
+                                                    app.config.pixel_on_hover = !app.config.pixel_on_hover;
+                                                    let _ = save_config(&app.config);
+                                                    app.status_message = if app.config.pixel_on_hover {
+                                                        "Real artworks, pixel art on hover".into()
+                                                    } else {
+                                                        "Pixel art artworks, real picture on hover".into()
+                                                    };
+                                                }
+                                                6 => {
                                                     let new_arl = app.search_query.trim();
                                                     if new_arl.is_empty() {
                                                         app.status_message = "Type new ARL in search box first".into();
@@ -1365,7 +1393,7 @@ async fn run_tui_loop(
                                                         app.search_query.clear();
                                                     }
                                                 }
-                                                6 => match app.update.clone() {
+                                                7 => match app.update.clone() {
                                                     Some(release) => {
                                                         app.status_message = format!("Downloading {}...", release.tag_name);
                                                         let tx = update_tx.clone();
@@ -1499,6 +1527,15 @@ async fn run_tui_loop(
                                                                 .map_err(|_| anyhow!("failed to send play track command"))?;
                                                             app.is_playing = true;
                                                         }
+                                                    }
+                                                }
+                                                SearchCategory::Albums => {
+                                                    if let Some((album_id, title, _)) = app.search_albums.get(idx).cloned() {
+                                                        app.current_playlist_id = Some(format!("__album__:{album_id}"));
+                                                        app.command_sender
+                                                            .send(Command::LoadAlbum(album_id))
+                                                            .map_err(|_| anyhow!("failed to load album"))?;
+                                                        app.status_message = format!("Loading album: {title}");
                                                     }
                                                 }
                                                 SearchCategory::Playlists => {
@@ -1690,6 +1727,7 @@ async fn run_tui_loop(
                     app.showing_search_results = false;
                     app.search_playlists.clear();
                     app.search_artists.clear();
+                    app.search_albums.clear();
                     app.leave_special_views();
                     app.viewing_settings = false;
                     app.main_state.select(Some(0));
@@ -1958,16 +1996,14 @@ async fn run_tui_loop(
                     app.show_tracks(tracks);
                     app.play_current_tracks();
                 }
-                UiEvent::SearchResultsLoaded {
-                    tracks,
-                    playlists,
-                    artists,
-                } => {
+                UiEvent::SearchResultsLoaded(results) => {
                     app.loading = None;
                     app.remember_view(&ViewState::Search);
-                    app.current_tracks = tracks;
-                    app.search_playlists = playlists;
-                    app.search_artists = artists;
+                    app.current_tracks = results.tracks;
+                    app.search_playlists = results.playlists;
+                    app.search_artists = results.artists;
+                    app.search_albums = results.albums;
+                    app.search_meta = results.meta;
                     app.showing_search_results = true;
                     app.leave_special_views();
                     app.search_category = SearchCategory::Tracks;
@@ -1975,8 +2011,9 @@ async fn run_tui_loop(
                     app.viewing_settings = false;
                     app.active_panel = ActivePanel::Main;
                     app.status_message = format!(
-                        "Search: {} tracks, {} playlists, {} artists",
+                        "Search: {} tracks, {} albums, {} playlists, {} artists",
                         app.current_tracks.len(),
+                        app.search_albums.len(),
                         app.search_playlists.len(),
                         app.search_artists.len()
                     );
@@ -2054,6 +2091,7 @@ fn handle_mouse(
             let region = app.clicks.iter().rev().find(|c| inside(c.rect)).cloned();
             app.logo_hover = matches!(region.as_ref().map(|r| &r.hit), Some(Hit::Logo));
             app.now_playing_hover = app.clicks.iter().any(|c| c.hit == Hit::NowPlaying && inside(c.rect));
+            app.search_hover = app.clicks.iter().any(|c| c.hit == Hit::SearchBar && inside(c.rect));
             app.image_preview = match region.as_ref().map(|r| &r.hit) {
                 Some(Hit::Image(url)) => Some(url.clone()),
                 _ => None,
@@ -2331,7 +2369,7 @@ struct ApiCache {
     albums: HashMap<String, AlbumPage>,
     /// track id → (album id, artist id)
     track_refs: HashMap<String, (Option<String>, Option<String>)>,
-    searches: HashMap<String, (Vec<(String, String, String)>, Vec<(String, String)>, Vec<(String, String)>)>,
+    searches: HashMap<String, SearchResults>,
     library_albums: Option<Vec<LibraryAlbum>>,
     library_artists: Option<Vec<ArtistRef>>,
     pages: HashMap<String, BrowsePage>,
@@ -2795,17 +2833,13 @@ async fn audio_worker_loop(
                 let key = query.trim().to_lowercase();
                 let cached = api.cache.lock().unwrap().searches.get(&key).cloned();
                 match cached {
-                    Some((tracks, playlists, artists)) => {
-                        let _ = event_tx.send(UiEvent::SearchResultsLoaded { tracks, playlists, artists });
+                    Some(results) => {
+                        let _ = event_tx.send(UiEvent::SearchResultsLoaded(results));
                     }
                     None => api.run("Searching…", move |client, cache| async move {
-                        let (tracks, playlists, artists) = client.fetch_search_results(&query).await?;
-                        cache
-                            .lock()
-                            .unwrap()
-                            .searches
-                            .insert(key, (tracks.clone(), playlists.clone(), artists.clone()));
-                        Ok(UiEvent::SearchResultsLoaded { tracks, playlists, artists })
+                        let results = client.fetch_search_results(&query).await?;
+                        cache.lock().unwrap().searches.insert(key, results.clone());
+                        Ok(UiEvent::SearchResultsLoaded(results))
                     }),
                 }
             }
@@ -3240,21 +3274,9 @@ fn apply_resume(app: &mut App, history: &[HistoryEntry]) {
         app.queue_state.select(Some(0));
     }
 
-    // Re-open the view the track was launched from so the main panel matches.
-    if let Some(source) = local.current_playlist_id.as_deref() {
-        let cmd = match source {
-            // Sources saved before Home / Explore became web pages.
-            "__home__" => Some(Command::LoadPage("home".into())),
-            "__explore__" => Some(Command::LoadPage("channels/explore".into())),
-            s if s.starts_with("__album__:") => Some(Command::LoadAlbum(s["__album__:".len()..].to_owned())),
-            s if s.starts_with("__artist__:") => Some(Command::LoadArtist(s["__artist__:".len()..].to_owned())),
-            id if !id.is_empty() => Some(Command::LoadPlaylist(id.to_owned())),
-            _ => None,
-        };
-        if let Some(cmd) = cmd {
-            app.current_playlist_id = Some(source.to_owned());
-            let _ = app.command_sender.send(cmd);
-        }
+    // The main panel stays on Home; only the source of the queue is restored.
+    if let Some(source) = local.current_playlist_id.as_deref().filter(|s| !s.is_empty()) {
+        app.current_playlist_id = Some(source.to_owned());
     }
 
     let _ = app.command_sender.send(Command::PlayTrackAt {

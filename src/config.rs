@@ -72,6 +72,9 @@ pub struct Config {
     /// Index into `SIDEBAR_SPLITS`: playlists / queue height ratio.
     #[serde(default = "default_split")]
     pub sidebar_split: usize,
+    /// Artworks show the real picture, and the pixel art only while hovered.
+    #[serde(default)]
+    pub pixel_on_hover: bool,
 }
 
 /// Playlists / queue percentages cycled by clicking a panel title.
@@ -96,6 +99,7 @@ impl Default for Config {
             arl: String::new(),
             resume_on_start: true,
             sidebar_split: 2,
+            pixel_on_hover: false,
         }
     }
 }

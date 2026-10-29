@@ -5,7 +5,7 @@ use std::time::Instant;
 use ratatui::widgets::ListState;
 use tokio::sync::mpsc;
 
-use crate::api::{AlbumPage, ArtistPage, ArtistRef, BrowsePage, HistoryEntry, LibraryAlbum};
+use crate::api::{AlbumPage, ArtistPage, ArtistRef, BrowsePage, HistoryEntry, LibraryAlbum, SearchMeta, SearchResults};
 use crate::config::{AudioQuality, Config};
 use crate::state::PlaybackState;
 use crate::theme::MatugenColors;
@@ -76,11 +76,7 @@ pub enum UiEvent {
     TracksLoaded(Vec<(String, String, String)>),
     /// A track mix: shown like a playlist and played from its first track.
     MixLoaded(Vec<(String, String, String)>),
-    SearchResultsLoaded {
-        tracks: Vec<(String, String, String)>,
-        playlists: Vec<(String, String)>,
-        artists: Vec<(String, String)>,
-    },
+    SearchResultsLoaded(SearchResults),
     /// Listening history fetched at startup (empty when unavailable).
     HistoryLoaded(Vec<HistoryEntry>),
     /// A background request started (Some(label)) or finished (None).
@@ -260,6 +256,7 @@ pub fn fmt_duration(secs: u64) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchCategory {
     Tracks,
+    Albums,
     Playlists,
     Artists,
 }
@@ -326,6 +323,12 @@ pub struct App {
     pub current_tracks: Vec<(String, String, String)>,
     pub search_playlists: Vec<(String, String)>,
     pub search_artists: Vec<(String, String)>,
+    /// (album id, title, artist)
+    pub search_albums: Vec<(String, String, String)>,
+    /// Artwork and second line of each search row ("track:<id>"…).
+    pub search_meta: HashMap<String, SearchMeta>,
+    /// Thumbnails of the search rows on screen (set while rendering).
+    pub search_visible: Vec<String>,
     pub showing_search_results: bool,
     pub search_category: SearchCategory,
     pub main_state: ListState,
@@ -398,6 +401,8 @@ pub struct App {
     pub logo_hover: bool,
     /// Pointer over the now-playing box (bottom-left).
     pub now_playing_hover: bool,
+    /// Pointer over the search bar: its border lights up.
+    pub search_hover: bool,
     /// Previous views, most recent last (Esc / PageUp pops one).
     pub history: Vec<ViewState>,
     /// Views left by going back, most recent last (PageDown pops one).
@@ -447,6 +452,9 @@ impl App {
             current_tracks: vec![],
             search_playlists: vec![],
             search_artists: vec![],
+            search_albums: vec![],
+            search_meta: HashMap::new(),
+            search_visible: vec![],
             showing_search_results: false,
             search_category: SearchCategory::Tracks,
             main_state,
@@ -497,6 +505,7 @@ impl App {
             matugen: None,
             logo_hover: false,
             now_playing_hover: false,
+            search_hover: false,
             history: Vec::new(),
             forward: Vec::new(),
             shown_view: None,
@@ -580,12 +589,13 @@ impl App {
                     return;
                 }
                 if self.viewing_settings {
-                    let max = 6usize;
+                    let max = 7usize;
                     let current = self.settings_state.selected().unwrap_or(0);
                     self.settings_state.select(Some((current + 1).min(max)));
                 } else if self.showing_search_results {
                     let max = match self.search_category {
                         SearchCategory::Tracks => self.current_tracks.len(),
+                        SearchCategory::Albums => self.search_albums.len().saturating_sub(1),
                         SearchCategory::Playlists => self.search_playlists.len().saturating_sub(1),
                         SearchCategory::Artists => self.search_artists.len().saturating_sub(1),
                     };
@@ -746,7 +756,8 @@ impl App {
                 } else if self.showing_search_results {
                     self.search_category = match self.search_category {
                         SearchCategory::Tracks => SearchCategory::Artists,
-                        SearchCategory::Playlists => SearchCategory::Tracks,
+                        SearchCategory::Albums => SearchCategory::Tracks,
+                        SearchCategory::Playlists => SearchCategory::Albums,
                         SearchCategory::Artists => SearchCategory::Playlists,
                     };
                     self.main_state.select(Some(0));
@@ -1092,6 +1103,7 @@ impl App {
                 urls.push(url);
             }
         }
+
         if let Some((Some(url), _, _)) = self.selected_detail() {
             urls.push(url);
         }
@@ -1103,6 +1115,10 @@ impl App {
             for url in urls.clone() {
                 urls.push(full_size_url(&url));
             }
+        }
+        // Search thumbnails stay small text-block pictures.
+        if self.showing_search_results {
+            urls.extend(self.search_visible.iter().cloned());
         }
         urls
     }
@@ -1127,10 +1143,22 @@ impl App {
 
     /// Track under the keyboard selection (main list or queue).
     pub fn selected_track(&self) -> Option<(String, String, String)> {
+        if let Some(now) = self.now_playing.as_ref().filter(|_| self.player_track_focused()) {
+            return Some((now.id.clone(), now.title.clone(), now.artist.clone()));
+        }
         match self.active_panel {
             ActivePanel::Queue => self.queue_tracks.get(self.queue_state.selected()?).cloned(),
             _ => self.track_at_main_row(self.main_state.selected()?),
         }
+    }
+
+    /// The playing track stands for the selection while the pointer is over
+    /// the now-playing box or the cover (bottom left), or the player has focus.
+    pub fn player_track_focused(&self) -> bool {
+        let cover = self.now_playing.as_ref().and_then(|n| n.album_art_url.as_ref());
+        self.now_playing_hover
+            || (cover.is_some() && self.image_preview.as_ref() == cover)
+            || matches!(self.active_panel, ActivePanel::Player | ActivePanel::PlayerProgress | ActivePanel::PlayerInfo)
     }
 
     /// Insert a track right after the current one (`next`) or at the end of
@@ -1178,6 +1206,7 @@ impl App {
         self.leave_special_views();
         self.search_playlists.clear();
         self.search_artists.clear();
+        self.search_albums.clear();
         if self.current_tracks.is_empty() {
             self.status_message = "No tracks found for this playlist/search".into();
         } else {
@@ -1332,7 +1361,8 @@ impl App {
     pub fn switch_search_category_right(&mut self) {
         if self.showing_search_results && self.active_panel == ActivePanel::Main {
             self.search_category = match self.search_category {
-                SearchCategory::Tracks => SearchCategory::Playlists,
+                SearchCategory::Tracks => SearchCategory::Albums,
+                SearchCategory::Albums => SearchCategory::Playlists,
                 SearchCategory::Playlists => SearchCategory::Artists,
                 SearchCategory::Artists => SearchCategory::Tracks,
             };
