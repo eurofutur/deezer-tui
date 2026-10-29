@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Usage: ./release.sh 0.2.0   (needs `gh auth login`)
-# Bumps Cargo.toml, builds, tags v<version>, pushes to Codeberg and GitHub, and
+# Bumps Cargo.toml, builds, tags v<version>, pushes to GitHub (eurofutur/deezer-tui,
+# a fork of Minuga-RC/deezer-tui) and publishes a GitHub release with the
+# binary that the app's updater downloads.
 # publishes a GitHub release with the binary that the app's updater downloads.
 set -euo pipefail
 
@@ -18,7 +19,6 @@ cargo build --release
 git commit -qam "Release $tag"
 git tag -a "$tag" -m "$tag"
 git push -q origin HEAD "$tag"
-git push -q github HEAD "$tag"
 
 notes=$(git log --format='- %s' "$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || git rev-list --max-parents=0 HEAD)..$tag^")
 cp target/release/deezer-tui "target/release/$asset"
