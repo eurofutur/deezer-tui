@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Usage: ./release.sh 0.2.0   (needs `gh auth login`)
 # Bumps Cargo.toml, builds, tags v<version>, pushes to GitHub (eurofutur/deezer-tui,
 # a fork of Minuga-RC/deezer-tui) and publishes a GitHub release with the
 # binary that the app's updater downloads.
