@@ -714,35 +714,31 @@ async fn run_tui_loop(
                     }
                     mpris::MprisEvent::SeekBy(offset_us) => {
                         if let Some(now) = app.now_playing.as_ref() {
-                            if now.quality != AudioQuality::Flac {
-                                let current_us = now.current_ms as i64 * 1_000;
-                                let new_us = (current_us + offset_us)
-                                    .max(0)
-                                    .min((now.total_ms as i64 - 1) * 1_000);
-                                let seek_ms = (new_us / 1_000) as u64;
-                                app.command_sender
-                                    .send(Command::PlayTrackAt {
-                                        track_id: now.id.clone(),
-                                        quality: now.quality,
-                                        seek_ms,
-                                    })
-                                    .map_err(|_| anyhow!("MPRIS: failed to seek"))?;
-                            }
+                            let current_us = now.current_ms as i64 * 1_000;
+                            let new_us = (current_us + offset_us)
+                                .max(0)
+                                .min((now.total_ms as i64 - 1) * 1_000);
+                            let seek_ms = (new_us / 1_000) as u64;
+                            app.command_sender
+                                .send(Command::PlayTrackAt {
+                                    track_id: now.id.clone(),
+                                    quality: now.quality,
+                                    seek_ms,
+                                })
+                                .map_err(|_| anyhow!("MPRIS: failed to seek"))?;
                         }
                     }
                     mpris::MprisEvent::SetPosition(pos_us) => {
                         if let Some(now) = app.now_playing.as_ref() {
-                            if now.quality != AudioQuality::Flac {
-                                let seek_ms =
-                                    ((pos_us.max(0) / 1_000) as u64).min(now.total_ms.saturating_sub(1));
-                                app.command_sender
-                                    .send(Command::PlayTrackAt {
-                                        track_id: now.id.clone(),
-                                        quality: now.quality,
-                                        seek_ms,
-                                    })
-                                    .map_err(|_| anyhow!("MPRIS: failed to set position"))?;
-                            }
+                            let seek_ms =
+                                ((pos_us.max(0) / 1_000) as u64).min(now.total_ms.saturating_sub(1));
+                            app.command_sender
+                                .send(Command::PlayTrackAt {
+                                    track_id: now.id.clone(),
+                                    quality: now.quality,
+                                    seek_ms,
+                                })
+                                .map_err(|_| anyhow!("MPRIS: failed to set position"))?;
                         }
                     }
                     mpris::MprisEvent::SetShuffle(shuffle) => {
@@ -1140,10 +1136,6 @@ async fn run_tui_loop(
                         KeyCode::Left if !app.is_searching => {
                             if app.active_panel == ActivePanel::PlayerProgress {
                                 if let Some(now) = app.now_playing.as_ref() {
-                                    if now.quality == AudioQuality::Flac {
-                                        app.status_message = "FLAC seek is disabled".into();
-                                        continue;
-                                    }
                                     let seek_ms = now.current_ms.saturating_sub(5_000);
                                     app.command_sender
                                         .send(Command::PlayTrackAt {
@@ -1168,11 +1160,7 @@ async fn run_tui_loop(
                                     1 => {
                                         if let Some(now) = app.now_playing.as_ref() {
                                             let quality = next_quality(now.quality, false);
-                                            let seek_ms = if quality == AudioQuality::Flac {
-                                                0
-                                            } else {
-                                                now.current_ms
-                                            };
+                                            let seek_ms = now.current_ms;
                                             app.command_sender
                                                 .send(Command::PlayTrackAt {
                                                     track_id: now.id.clone(),
@@ -1198,10 +1186,6 @@ async fn run_tui_loop(
                                 app.switch_search_category_right();
                             } else if app.active_panel == ActivePanel::PlayerProgress {
                                 if let Some(now) = app.now_playing.as_ref() {
-                                    if now.quality == AudioQuality::Flac {
-                                        app.status_message = "FLAC seek is disabled".into();
-                                        continue;
-                                    }
                                     let seek_ms = (now.current_ms + 5_000).min(now.total_ms.saturating_sub(1));
                                     app.command_sender
                                         .send(Command::PlayTrackAt {
@@ -1226,11 +1210,7 @@ async fn run_tui_loop(
                                     1 => {
                                         if let Some(now) = app.now_playing.as_ref() {
                                             let quality = next_quality(now.quality, true);
-                                            let seek_ms = if quality == AudioQuality::Flac {
-                                                0
-                                            } else {
-                                                now.current_ms
-                                            };
+                                            let seek_ms = now.current_ms;
                                             app.command_sender
                                                 .send(Command::PlayTrackAt {
                                                     track_id: now.id.clone(),
@@ -2181,15 +2161,13 @@ fn handle_mouse(
                 Some(Hit::Progress) => {
                     app.active_panel = ActivePanel::PlayerProgress;
                     if let Some(now) = app.now_playing.as_ref() {
-                        if now.quality != AudioQuality::Flac {
-                            let seek_ms = if up {
-                                (now.current_ms + 5_000).min(now.total_ms.saturating_sub(1))
-                            } else {
-                                now.current_ms.saturating_sub(5_000)
-                            };
-                            let now = now.clone();
-                            seek_to(app, &now, seek_ms);
-                        }
+                        let seek_ms = if up {
+                            (now.current_ms + 5_000).min(now.total_ms.saturating_sub(1))
+                        } else {
+                            now.current_ms.saturating_sub(5_000)
+                        };
+                        let now = now.clone();
+                        seek_to(app, &now, seek_ms);
                     }
                     return;
                 }
@@ -2322,14 +2300,10 @@ fn handle_mouse(
                 Hit::Progress => {
                     app.active_panel = ActivePanel::PlayerProgress;
                     if let Some(now) = app.now_playing.clone() {
-                        if now.quality == AudioQuality::Flac {
-                            app.status_message = "FLAC seek is disabled".into();
-                        } else {
-                            let ratio = (m.column.saturating_sub(region.rect.x)) as f64
-                                / region.rect.width.max(1) as f64;
-                            let seek_ms = ((now.total_ms as f64) * ratio.clamp(0.0, 1.0)) as u64;
-                            seek_to(app, &now, seek_ms);
-                        }
+                        let ratio = (m.column.saturating_sub(region.rect.x)) as f64
+                            / region.rect.width.max(1) as f64;
+                        let seek_ms = ((now.total_ms as f64) * ratio.clamp(0.0, 1.0)) as u64;
+                        seek_to(app, &now, seek_ms);
                     }
                 }
                 Hit::VolumeField => {
@@ -2984,7 +2958,7 @@ async fn run_play_track_pipeline(
         artist_id: metadata.artist_id.clone(),
         quality,
         album_art_url: metadata.album_art_url.clone(),
-        initial_ms: if quality == AudioQuality::Flac { 0 } else { seek_ms },
+        initial_ms: seek_ms,
     });
 
     let signed_url = client.fetch_media_url(&metadata.track_token, quality).await?;
@@ -3001,20 +2975,12 @@ async fn run_play_track_pipeline(
     let mut response = client.open_signed_stream(&signed_url).await?;
     let content_length = response.content_length();
     let track_key = derive_blowfish_key(&metadata.id);
-    let effective_seek_ms = if quality == AudioQuality::Flac {
-        0
-    } else {
-        seek_ms
-    };
     let track_duration_ms = metadata
         .duration_secs
         .map(|s| s * 1000)
         .unwrap_or_else(|| estimate_total_duration_ms(content_length, quality));
-    let seek_ms = effective_seek_ms.min(track_duration_ms.saturating_sub(1));
-    let seek_target_bytes = content_length
-        .map(|total| total.saturating_mul(seek_ms) / track_duration_ms.max(1))
-        .unwrap_or(0);
-    let mut skipped_bytes: u64 = 0;
+    let seek_ms = seek_ms.min(track_duration_ms.saturating_sub(1));
+    let mut skip = SeekSkip::new(quality == AudioQuality::Flac, content_length, seek_ms, track_duration_ms);
 
     let _ = event_tx.send(UiEvent::PlaybackProgress {
         current_ms: seek_ms,
@@ -3030,18 +2996,11 @@ async fn run_play_track_pipeline(
         while pending.len() >= DEEZER_CHUNK_SIZE {
             let mut chunk = pending.drain(..DEEZER_CHUNK_SIZE).collect::<Vec<u8>>();
             decrypt_chunk_in_place_with_key(&track_key, chunk_index, &mut chunk)?;
+            chunk_index += 1;
 
-            if skipped_bytes < seek_target_bytes {
-                let remaining_skip = (seek_target_bytes - skipped_bytes) as usize;
-                if remaining_skip >= chunk.len() {
-                    skipped_bytes = skipped_bytes.saturating_add(chunk.len() as u64);
-                    chunk_index += 1;
-                    continue;
-                }
-
-                let kept = chunk.split_off(remaining_skip);
-                skipped_bytes = seek_target_bytes;
-                chunk = kept;
+            let chunk = skip.feed(chunk);
+            if chunk.is_empty() {
+                continue;
             }
 
             queued_bytes += chunk.len();
@@ -3058,24 +3017,17 @@ async fn run_play_track_pipeline(
                     event_tx.clone(),
                 )?;
             }
-
-            chunk_index += 1;
         }
     }
 
-    if !pending.is_empty() {
-        let mut tail_chunk = pending;
+    let mut tail_chunk = pending;
+    if !tail_chunk.is_empty() {
         decrypt_chunk_in_place_with_key(&track_key, chunk_index, &mut tail_chunk)?;
-        if skipped_bytes < seek_target_bytes {
-            let remaining_skip = (seek_target_bytes - skipped_bytes) as usize;
-            if remaining_skip >= tail_chunk.len() {
-                return Ok(());
-            }
-            tail_chunk = tail_chunk.split_off(remaining_skip);
-        }
-        if sender.send(tail_chunk).is_err() {
-            return Ok(());
-        }
+    }
+    let mut tail_chunk = skip.feed(tail_chunk);
+    tail_chunk.extend(skip.finish());
+    if !tail_chunk.is_empty() && sender.send(tail_chunk).is_err() {
+        return Ok(());
     }
 
     if player_thread.is_none() {
@@ -3096,6 +3048,92 @@ async fn run_play_track_pipeline(
     }
 
     Ok(())
+}
+
+/// Drops the decrypted bytes between the stream header and the seek target.
+/// MP3 frames resync anywhere, so its header is empty; FLAC needs its
+/// `fLaC` + metadata blocks kept, after which symphonia resyncs on the next frame.
+struct SeekSkip {
+    pos: u64,
+    /// `None` while a FLAC header is still being buffered.
+    head: Option<u64>,
+    head_buf: Vec<u8>,
+    target: u64,
+    content_length: Option<u64>,
+    seek_ms: u64,
+    duration_ms: u64,
+}
+
+impl SeekSkip {
+    fn new(flac: bool, content_length: Option<u64>, seek_ms: u64, duration_ms: u64) -> Self {
+        let mut skip = Self {
+            pos: 0,
+            head: None,
+            head_buf: Vec::new(),
+            target: 0,
+            content_length,
+            seek_ms,
+            duration_ms: duration_ms.max(1),
+        };
+        if !flac || seek_ms == 0 {
+            skip.set_head(0);
+        }
+        skip
+    }
+
+    fn set_head(&mut self, head: u64) {
+        self.head = Some(head);
+        self.target = self
+            .content_length
+            .map(|total| head + total.saturating_sub(head).saturating_mul(self.seek_ms) / self.duration_ms)
+            .unwrap_or(head);
+    }
+
+    fn feed(&mut self, chunk: Vec<u8>) -> Vec<u8> {
+        let chunk = if self.head.is_none() {
+            self.head_buf.extend_from_slice(&chunk);
+            match flac_header_len(&self.head_buf) {
+                Some(n) => {
+                    self.set_head(n as u64);
+                    std::mem::take(&mut self.head_buf)
+                }
+                None => return Vec::new(),
+            }
+        } else {
+            chunk
+        };
+        let head = self.head.unwrap_or(0);
+        let start = self.pos;
+        self.pos += chunk.len() as u64;
+        // Keep [start, head) and [target, end) of this chunk.
+        let cut_from = head.clamp(start, self.pos) - start;
+        let cut_to = self.target.clamp(start, self.pos) - start;
+        let mut chunk = chunk;
+        chunk.drain(cut_from as usize..cut_to as usize);
+        chunk
+    }
+
+    /// Bytes still held back (a stream too short or malformed to hold a full FLAC header).
+    fn finish(self) -> Vec<u8> {
+        self.head_buf
+    }
+}
+
+/// Length of the `fLaC` marker plus all metadata blocks, or `None` if `buf`
+/// does not hold them all yet. Non-FLAC data gets `Some(0)`.
+fn flac_header_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() >= 4 && &buf[..4] != b"fLaC" {
+        return Some(0);
+    }
+    let mut pos = 4;
+    loop {
+        let header = buf.get(pos..pos + 4)?;
+        let len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        pos += 4 + len;
+        if header[0] & 0x80 != 0 {
+            return (pos <= buf.len()).then_some(pos);
+        }
+    }
 }
 
 fn estimate_total_duration_ms(total_bytes: Option<u64>, quality: AudioQuality) -> u64 {
@@ -3346,4 +3384,38 @@ fn save_config(config: &Config) -> AnyResult<()> {
     let data = serde_json::to_string_pretty(config).context("failed to serialize config")?;
     fs::write(&path, data)
         .with_context(|| format!("failed to write config file at {}", path.display()))
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::*;
+
+    fn run(flac: bool, data: &[u8], seek_ms: u64, chunk: usize) -> Vec<u8> {
+        let mut skip = SeekSkip::new(flac, Some(data.len() as u64), seek_ms, 1000);
+        let mut out = Vec::new();
+        for c in data.chunks(chunk) {
+            out.extend(skip.feed(c.to_vec()));
+        }
+        out.extend(skip.finish());
+        out
+    }
+
+    #[test]
+    fn flac_keeps_header_and_skips_audio() {
+        // fLaC + last-flag STREAMINFO block of 34 bytes = 42-byte header, then 958 audio bytes.
+        let mut data = b"fLaC".to_vec();
+        data.extend([0x80, 0, 0, 34]);
+        data.extend([7u8; 34]);
+        data.extend((0..958).map(|i| i as u8));
+        let out = run(true, &data, 500, 5);
+        assert_eq!(&out[..42], &data[..42]);
+        assert_eq!(&out[42..], &data[42 + 479..]);
+    }
+
+    #[test]
+    fn mp3_skips_from_start() {
+        let data: Vec<u8> = (0..1000).map(|i| i as u8).collect();
+        assert_eq!(run(false, &data, 250, 7), &data[250..]);
+        assert_eq!(run(true, &data, 0, 7), data);
+    }
 }
