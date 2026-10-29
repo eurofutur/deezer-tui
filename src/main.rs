@@ -1701,14 +1701,16 @@ async fn run_tui_loop(
                 UiEvent::LikedIdsLoaded(ids) => {
                     app.liked_ids = ids;
                 }
-                UiEvent::Liked { track_id, liked } => {
-                    if liked {
-                        app.liked_ids.insert(track_id);
-                    } else {
-                        app.liked_ids.remove(&track_id);
-                    }
-                    app.status_message =
-                        if liked { "Added to favorite tracks" } else { "Removed from favorite tracks" }.into();
+                UiEvent::Liked { track_id, liked, error } => {
+                    app.loading = None;
+                    app.status_message = match error {
+                        None if liked => "Added to favorite tracks".into(),
+                        None => "Removed from favorite tracks".into(),
+                        Some(err) => {
+                            set_liked(app, track_id, !liked);
+                            format!("Error: {err}")
+                        }
+                    };
                 }
                 UiEvent::Loading(label) => {
                     app.loading = label.map(|l| (l, Instant::now()));
@@ -2049,14 +2051,23 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> An
     Ok(())
 }
 
-/// Like / unlike the playing track.
+/// Like / unlike the playing track. The heart flips right away; it reverts if Deezer refuses.
 fn toggle_like(app: &mut App) {
-    match app.now_playing.as_ref() {
-        Some(now) => {
-            let liked = !app.liked_ids.contains(&now.id);
-            let _ = app.command_sender.send(Command::SetLiked { track_id: now.id.clone(), liked });
+    match app.now_playing.as_ref().map(|now| now.id.clone()) {
+        Some(track_id) => {
+            let liked = !app.liked_ids.contains(&track_id);
+            set_liked(app, track_id.clone(), liked);
+            let _ = app.command_sender.send(Command::SetLiked { track_id, liked });
         }
         None => app.status_message = "Nothing is playing".into(),
+    }
+}
+
+fn set_liked(app: &mut App, track_id: String, liked: bool) {
+    if liked {
+        app.liked_ids.insert(track_id);
+    } else {
+        app.liked_ids.remove(&track_id);
     }
 }
 
@@ -2767,9 +2778,9 @@ async fn audio_worker_loop(
             }
             Command::SetLiked { track_id, liked } => {
                 api.run(if liked { "Liking…" } else { "Unliking…" }, move |client, cache| async move {
-                    client.set_track_liked(&track_id, liked).await?;
+                    let error = client.set_track_liked(&track_id, liked).await.err().map(|e| e.to_string());
                     cache.lock().unwrap().playlists.remove(FAVORITES_KEY);
-                    Ok(UiEvent::Liked { track_id, liked })
+                    Ok(UiEvent::Liked { track_id, liked, error })
                 });
             }
             Command::OpenAlbumOfTrack(track_id) => {

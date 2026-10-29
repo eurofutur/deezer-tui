@@ -1800,6 +1800,10 @@ fn render_right_panel(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: 
 
 // ── Player bar ────────────────────────────────────────────────────────────────
 
+/// Deezer's logo (9 rounded bars shaped as a heart) in left half-blocks, one bar per cell.
+const LIKE_HEART: [&str; 4] = ["▖▖▌▖ ▖▌▖▖", "▘▌▌▌▌▌▌▌▘", " ▘▌▌▌▌▌▘ ", "   ▘▌▘   "];
+const LIKE_HEART_WIDTH: u16 = 9;
+
 fn render_player_bar(
     f: &mut ratatui::Frame<'_>,
     app: &App,
@@ -1821,25 +1825,33 @@ fn render_player_bar(
         Line::from(Span::styled(track_artist, muted(p))),
     ]);
 
-    // Left: title / artist (the cover lives in the sidebar, bottom-left), heart on the right.
+    // Left: title / artist (the cover lives in the sidebar, bottom-left), then the
+    // like heart right after the text, or against the right border if the text is long.
     let info_area = player_bar[0];
+    let body = Block::default().borders(Borders::ALL).inner(info_area);
+    let heart = app.now_playing.as_ref().map(|now| {
+        let text_w = now.title.chars().count().max(now.artist.chars().count()) as u16;
+        let x = (body.x + 1 + text_w + 2).min(body.right().saturating_sub(LIKE_HEART_WIDTH + 1));
+        Rect {
+            x: x.max(body.x),
+            y: body.y,
+            width: LIKE_HEART_WIDTH.min(body.width),
+            height: (LIKE_HEART.len() as u16).min(body.height),
+        }
+    });
+    let text_right_pad = heart.map_or(1, |h| info_area.right().saturating_sub(h.x));
     f.render_widget(
-        track_info.block(panel(None, app.now_playing_hover, p).padding(Padding::new(1, 4, 1, 0))),
+        track_info.block(panel(None, app.now_playing_hover, p).padding(Padding::new(1, text_right_pad, 1, 0))),
         info_area,
     );
     hit(hits, info_area, Hit::NowPlaying);
-    if let Some(now) = &app.now_playing {
+    if let (Some(now), Some(heart)) = (&app.now_playing, heart) {
         let inner = panel(None, false, p).padding(Padding::new(1, 1, 1, 0)).inner(info_area);
         hit(hits, Rect { height: 1, ..inner }, Hit::TrackAlbum(now.id.clone()));
         hit(hits, Rect { y: inner.y + 1, height: 1, ..inner }, Hit::TrackArtist(now.id.clone()));
-        // Filled heart in Deezer purple (its logo) when liked, outline otherwise.
-        let (glyph, style) = if app.liked_ids.contains(&now.id) {
-            ("♥", Style::default().fg(Color::Rgb(162, 56, 255)).add_modifier(Modifier::BOLD))
-        } else {
-            ("♡", muted(p))
-        };
-        let heart = Rect { x: inner.right().saturating_sub(2), width: 2, height: 1, ..inner };
-        f.render_widget(Paragraph::new(glyph).style(style), heart);
+        // Deezer's equaliser heart: bright when liked, grey otherwise.
+        let style = Style::default().fg(if app.liked_ids.contains(&now.id) { p.fg } else { p.muted });
+        f.render_widget(Paragraph::new(LIKE_HEART.map(Line::from).to_vec()).style(style), heart);
         hit(hits, heart, Hit::Like);
     }
 

@@ -77,7 +77,8 @@ pub enum UiEvent {
     OwnPlaylistsLoaded(Vec<(String, String)>),
     /// Ids of every liked track, fetched at startup.
     LikedIdsLoaded(HashSet<String>),
-    Liked { track_id: String, liked: bool },
+    /// Outcome of a like / unlike; `error` set means Deezer refused and the heart reverts.
+    Liked { track_id: String, liked: bool, error: Option<String> },
     TracksLoaded(Vec<(String, String, String)>),
     /// A track mix: shown like a playlist and played from its first track.
     MixLoaded(Vec<(String, String, String)>),
