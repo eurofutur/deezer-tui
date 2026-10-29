@@ -2053,6 +2053,7 @@ fn handle_mouse(
             }
             let region = app.clicks.iter().rev().find(|c| inside(c.rect)).cloned();
             app.logo_hover = matches!(region.as_ref().map(|r| &r.hit), Some(Hit::Logo));
+            app.now_playing_hover = app.clicks.iter().any(|c| c.hit == Hit::NowPlaying && inside(c.rect));
             app.image_preview = match region.as_ref().map(|r| &r.hit) {
                 Some(Hit::Image(url)) => Some(url.clone()),
                 _ => None,
@@ -2067,7 +2068,9 @@ fn handle_mouse(
             }
             let Some(region) = region else { return };
             match region.hit {
-                Hit::Logo | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle => {}
+                Hit::Logo | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle | Hit::NowPlaying => {}
+                // Title / artist inside the now-playing box: only that box lights up.
+                Hit::TrackAlbum(_) | Hit::TrackArtist(_) if app.now_playing_hover => {}
                 Hit::Focus(panel) => app.active_panel = panel,
                 Hit::NavItem(i) => {
                     app.active_panel = ActivePanel::Navigation;
@@ -2305,7 +2308,7 @@ fn handle_mouse(
                     app.status_message = "Opening artist...".into();
                     let _ = app.command_sender.send(Command::OpenArtistOfTrack(track_id));
                 }
-                Hit::MenuItem(_) | Hit::Image(_) => {}
+                Hit::MenuItem(_) | Hit::Image(_) | Hit::NowPlaying => {}
                 Hit::SplitCycle => {
                     let n = config::SIDEBAR_SPLITS.len();
                     app.config.sidebar_split = (app.config.sidebar_split + 1) % n;

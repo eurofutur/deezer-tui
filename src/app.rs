@@ -199,6 +199,8 @@ pub enum Hit {
     MenuItem(usize),
     /// Title bar of the Playlists / Queue panels: cycles their height split.
     SplitCycle,
+    /// The now-playing box (bottom-left): hover highlights its border.
+    NowPlaying,
     /// An artwork; hovering shows a large preview (url of the full-size image).
     Image(String),
     /// A card of a web page: hover selects, click opens.
@@ -394,6 +396,8 @@ pub struct App {
     /// Wallpaper palette (None until DMS has written it).
     pub matugen: Option<MatugenColors>,
     pub logo_hover: bool,
+    /// Pointer over the now-playing box (bottom-left).
+    pub now_playing_hover: bool,
     /// Previous views, most recent last (Esc / PageUp pops one).
     pub history: Vec<ViewState>,
     /// Views left by going back, most recent last (PageDown pops one).
@@ -492,6 +496,7 @@ impl App {
             image_preview: None,
             matugen: None,
             logo_hover: false,
+            now_playing_hover: false,
             history: Vec::new(),
             forward: Vec::new(),
             shown_view: None,

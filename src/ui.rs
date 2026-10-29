@@ -1659,9 +1659,10 @@ fn render_player_bar(
     // Left: title / artist (the cover lives in the sidebar, bottom-left)
     let info_area = player_bar[0];
     f.render_widget(
-        track_info.block(panel(None, false, p).padding(Padding::new(1, 1, 1, 0))),
+        track_info.block(panel(None, app.now_playing_hover, p).padding(Padding::new(1, 1, 1, 0))),
         info_area,
     );
+    hit(hits, info_area, Hit::NowPlaying);
     if let Some(now) = &app.now_playing {
         let inner = panel(None, false, p).padding(Padding::new(1, 1, 1, 0)).inner(info_area);
         hit(hits, Rect { height: 1, ..inner }, Hit::TrackAlbum(now.id.clone()));
