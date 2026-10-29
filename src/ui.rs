@@ -1743,7 +1743,7 @@ fn render_right_panel(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: 
             ActivePanel::Search => {}
         }
     }
-    let global: [(&str, &str); 13] = [
+    let global: [(&str, &str); 14] = [
         ("Tab", "Next panel"),
         ("S-Tab", "Previous panel"),
         ("j k", "Move"),
@@ -1751,6 +1751,7 @@ fn render_right_panel(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: 
         ("/", "Search"),
         ("p", "Play / pause"),
         ("a", "Artist of track"),
+        ("l", "Like playing track"),
         ("e", "Album of track"),
         ("m", "Mix from track"),
         ("M", "Track menu"),
@@ -1820,10 +1821,10 @@ fn render_player_bar(
         Line::from(Span::styled(track_artist, muted(p))),
     ]);
 
-    // Left: title / artist (the cover lives in the sidebar, bottom-left)
+    // Left: title / artist (the cover lives in the sidebar, bottom-left), heart on the right.
     let info_area = player_bar[0];
     f.render_widget(
-        track_info.block(panel(None, app.now_playing_hover, p).padding(Padding::new(1, 1, 1, 0))),
+        track_info.block(panel(None, app.now_playing_hover, p).padding(Padding::new(1, 4, 1, 0))),
         info_area,
     );
     hit(hits, info_area, Hit::NowPlaying);
@@ -1831,6 +1832,15 @@ fn render_player_bar(
         let inner = panel(None, false, p).padding(Padding::new(1, 1, 1, 0)).inner(info_area);
         hit(hits, Rect { height: 1, ..inner }, Hit::TrackAlbum(now.id.clone()));
         hit(hits, Rect { y: inner.y + 1, height: 1, ..inner }, Hit::TrackArtist(now.id.clone()));
+        // Filled heart in Deezer purple (its logo) when liked, outline otherwise.
+        let (glyph, style) = if app.liked_ids.contains(&now.id) {
+            ("♥", Style::default().fg(Color::Rgb(162, 56, 255)).add_modifier(Modifier::BOLD))
+        } else {
+            ("♡", muted(p))
+        };
+        let heart = Rect { x: inner.right().saturating_sub(2), width: 2, height: 1, ..inner };
+        f.render_widget(Paragraph::new(glyph).style(style), heart);
+        hit(hits, heart, Hit::Like);
     }
 
     // Centre: controls + progress

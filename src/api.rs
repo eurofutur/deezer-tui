@@ -964,6 +964,31 @@ impl DeezerClient {
         }
     }
 
+    /// Ids of every liked track (gateway `song.getFavoriteIds`).
+    pub async fn fetch_favorite_ids(&self) -> Result<HashSet<String>> {
+        const PAGE: usize = 2000;
+        let mut ids = HashSet::new();
+        loop {
+            let json = self.gw_post("song.getFavoriteIds", json!({ "nb": PAGE, "start": ids.len() })).await?;
+            let data = json["results"]["data"].as_array().cloned().unwrap_or_default();
+            ids.extend(data.iter().filter_map(|t| str_or_num(&t["SNG_ID"])));
+            if data.len() < PAGE {
+                return Ok(ids);
+            }
+        }
+    }
+
+    /// Like or unlike a track (gateway `favorite_song.add` / `favorite_song.remove`).
+    pub async fn set_track_liked(&self, track_id: &str, liked: bool) -> Result<()> {
+        let method = if liked { "favorite_song.add" } else { "favorite_song.remove" };
+        let json = self.gw_post(method, json!({ "SNG_ID": track_id })).await?;
+        if json["results"].as_bool() == Some(true) {
+            Ok(())
+        } else {
+            Err(anyhow!("Deezer refused {method}: {}", json["error"]))
+        }
+    }
+
     /// (id, title, owned by the user) for every playlist in the library.
     pub async fn fetch_user_playlists(&self, user_id: &str) -> Result<Vec<(String, String, bool)>> {
         let api_token = self

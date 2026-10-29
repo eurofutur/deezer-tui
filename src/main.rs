@@ -472,6 +472,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = playlists_event_tx.send(UiEvent::Error(format!("API Error fetching playlists: {}", err)));
                                 }
                             }
+                            if let Ok(ids) = client.fetch_favorite_ids().await {
+                                let _ = playlists_event_tx.send(UiEvent::LikedIdsLoaded(ids));
+                            }
                             if resume_on_start {
                                 // Deezer history is used to decide whether something newer was
                                 // played on another device since the last local snapshot.
@@ -1072,6 +1075,7 @@ async fn run_tui_loop(
                                 None => app.status_message = "Select a track first".into(),
                             }
                         }
+                        KeyCode::Char('l') if !app.is_searching => toggle_like(app),
                         // Esc / PageUp: previous page; PageDown: next page (browser-style history).
                         KeyCode::Esc | KeyCode::PageUp if !in_search && !app.history.is_empty() => {
                             if let Some(previous) = app.history.pop() {
@@ -1694,6 +1698,18 @@ async fn run_tui_loop(
                 UiEvent::OwnPlaylistsLoaded(playlists) => {
                     app.own_playlists = playlists;
                 }
+                UiEvent::LikedIdsLoaded(ids) => {
+                    app.liked_ids = ids;
+                }
+                UiEvent::Liked { track_id, liked } => {
+                    if liked {
+                        app.liked_ids.insert(track_id);
+                    } else {
+                        app.liked_ids.remove(&track_id);
+                    }
+                    app.status_message =
+                        if liked { "Added to favorite tracks" } else { "Removed from favorite tracks" }.into();
+                }
                 UiEvent::Loading(label) => {
                     app.loading = label.map(|l| (l, Instant::now()));
                 }
@@ -2033,6 +2049,17 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> An
     Ok(())
 }
 
+/// Like / unlike the playing track.
+fn toggle_like(app: &mut App) {
+    match app.now_playing.as_ref() {
+        Some(now) => {
+            let liked = !app.liked_ids.contains(&now.id);
+            let _ = app.command_sender.send(Command::SetLiked { track_id: now.id.clone(), liked });
+        }
+        None => app.status_message = "Nothing is playing".into(),
+    }
+}
+
 /// Restart the current track at `seek_ms`, keeping it paused if it was paused.
 fn seek_to(app: &mut App, now: &NowPlaying, seek_ms: u64) {
     let _ = app.command_sender.send(Command::PlayTrackAt {
@@ -2087,7 +2114,7 @@ fn handle_mouse(
             }
             let Some(region) = region else { return };
             match region.hit {
-                Hit::Logo | Hit::UpdateButton | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle | Hit::NowPlaying => {}
+                Hit::Logo | Hit::UpdateButton | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle | Hit::NowPlaying | Hit::Like => {}
                 // Title / artist inside the now-playing box: only that box lights up.
                 Hit::TrackAlbum(_) | Hit::TrackArtist(_) if app.now_playing_hover => {}
                 Hit::Focus(panel) => app.active_panel = panel,
@@ -2314,6 +2341,7 @@ fn handle_mouse(
                     app.active_panel = ActivePanel::PlayerInfo;
                     app.player_info_index = 1;
                 }
+                Hit::Like => toggle_like(app),
                 Hit::TrackAlbum(track_id) => {
                     app.status_message = "Opening album...".into();
                     let _ = app.command_sender.send(Command::OpenAlbumOfTrack(track_id));
@@ -2735,6 +2763,13 @@ async fn audio_worker_loop(
                     client.add_track_to_playlist(&playlist_id, &track_id).await?;
                     cache.lock().unwrap().playlists.remove(&playlist_id);
                     Ok(UiEvent::Error(format!("Added to {playlist_title}")))
+                });
+            }
+            Command::SetLiked { track_id, liked } => {
+                api.run(if liked { "Liking…" } else { "Unliking…" }, move |client, cache| async move {
+                    client.set_track_liked(&track_id, liked).await?;
+                    cache.lock().unwrap().playlists.remove(FAVORITES_KEY);
+                    Ok(UiEvent::Liked { track_id, liked })
                 });
             }
             Command::OpenAlbumOfTrack(track_id) => {

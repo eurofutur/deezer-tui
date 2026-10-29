@@ -44,6 +44,8 @@ pub enum Command {
         playlist_title: String,
         track_id: String,
     },
+    /// Like / unlike a track (favorite tracks).
+    SetLiked { track_id: String, liked: bool },
     /// Resolve a track's album / artist from its metadata, then open it.
     OpenAlbumOfTrack(String),
     OpenArtistOfTrack(String),
@@ -73,6 +75,9 @@ pub enum UiEvent {
     PlaylistsLoaded(Vec<(String, String)>),
     /// Playlists the user owns (targets of "Add to playlist").
     OwnPlaylistsLoaded(Vec<(String, String)>),
+    /// Ids of every liked track, fetched at startup.
+    LikedIdsLoaded(HashSet<String>),
+    Liked { track_id: String, liked: bool },
     TracksLoaded(Vec<(String, String, String)>),
     /// A track mix: shown like a playlist and played from its first track.
     MixLoaded(Vec<(String, String, String)>),
@@ -201,6 +206,8 @@ pub enum Hit {
     SplitCycle,
     /// The now-playing box (bottom-left): hover highlights its border.
     NowPlaying,
+    /// Heart in the now-playing box: likes / unlikes the playing track.
+    Like,
     /// An artwork; hovering shows a large preview (url of the full-size image).
     Image(String),
     /// A card of a web page: hover selects, click opens.
@@ -407,6 +414,7 @@ pub struct App {
     pub logo_hover: bool,
     /// Pointer over the now-playing box (bottom-left).
     pub now_playing_hover: bool,
+    pub liked_ids: HashSet<String>,
     /// Pointer over the search bar: its border lights up.
     pub search_hover: bool,
     /// Previous views, most recent last (Esc / PageUp pops one).
@@ -512,6 +520,7 @@ impl App {
             matugen: None,
             logo_hover: false,
             now_playing_hover: false,
+            liked_ids: HashSet::new(),
             search_hover: false,
             history: Vec::new(),
             forward: Vec::new(),

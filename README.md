@@ -96,6 +96,7 @@ Artist page: Mix, top tracks, discography, similar artists, playlists, bio.
 <tr><th colspan="2" align="left">Playback</th></tr>
 <tr><td><kbd>p</kbd> &nbsp;or&nbsp; <kbd>Space</kbd></td><td>Play / pause</td></tr>
 <tr><td><kbd>z</kbd></td><td>Play next</td></tr>
+<tr><td><kbd>l</kbd></td><td>Like / unlike the playing track (or click the heart in the now-playing box)</td></tr>
 <tr><td><kbd>m</kbd></td><td>Mix from the focused track</td></tr>
 <tr><td><kbd>M</kbd></td><td>Track menu</td></tr>
 <tr><th colspan="2" align="left">Go to</th></tr>
