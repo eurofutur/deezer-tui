@@ -338,7 +338,7 @@ pub struct App {
     /// (source id, title) of a mix or Flow opened from a web page, for the header.
     pub list_title: Option<(String, String)>,
     pub status_message: String,
-    /// Newer Codeberg release found by the update check.
+    /// Newer GitHub release found by the update check.
     pub update: Option<crate::update::Release>,
     pub is_searching: bool,
     pub search_query: String,

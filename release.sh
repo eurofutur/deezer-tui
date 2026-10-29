@@ -2,7 +2,6 @@
 # Bumps Cargo.toml, builds, tags v<version>, pushes to GitHub (eurofutur/deezer-tui,
 # a fork of Minuga-RC/deezer-tui) and publishes a GitHub release with the
 # binary that the app's updater downloads.
-# publishes a GitHub release with the binary that the app's updater downloads.
 set -euo pipefail
 
 version=${1:?usage: release.sh <version, e.g. 0.2.0>}
