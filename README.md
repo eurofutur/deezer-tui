@@ -13,24 +13,49 @@ maintain. It keeps the original engine (streaming, decryption, MPRIS, Discord) a
 
 ## Screenshots
 
-| | |
-|---|---|
-| ![Artist page](images/artist.png) | ![Track menu](images/menu.png) |
-| Artist page: top tracks, albums, related artists | Track menu: play next, add to queue, add to a playlist, start a mix |
-| ![Search](images/search.png) | ![Matugen theme](images/matugen.png) |
-| Search by category: tracks, albums, artists, playlists | Matugen theme, following your wallpaper colours |
+![Artist page](images/artist.png)
 
-![Real artwork in kitty](images/kitty-artwork.png)
+Artist page: Mix, top tracks, discography, similar artists, playlists, bio.
 
-In terminals with the kitty graphics protocol (kitty, Ghostty, WezTerm…), hovering a cover shows the real image.
-Elsewhere covers are drawn with Unicode half-blocks.
+<table>
+<tr>
+<td width="62%"><img src="images/search.png" alt="Search results"></td>
+<td><img src="images/menu.png" alt="Track menu"></td>
+</tr>
+<tr>
+<td>Search results by category, with <em>Play all results</em></td>
+<td>Track menu (right click or <kbd>M</kbd>): play next, add to queue, start a mix, add to a playlist</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td><img src="images/explore.png" alt="Explore, Deezer theme"></td>
+<td><img src="images/matugen.png" alt="Explore, Matugen theme"></td>
+</tr>
+<tr>
+<td>Explore, Deezer theme</td>
+<td>Same page with the Matugen theme, which follows your wallpaper colours</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td align="center"><img src="images/artwork-kitty.png" alt="Real artwork in kitty" width="260"></td>
+<td align="center"><img src="images/artwork-blocks.png" alt="Half-block artwork" width="260"></td>
+</tr>
+<tr>
+<td align="center">kitty graphics protocol: hovering a cover shows the real image</td>
+<td align="center">Other terminals: Unicode half-blocks</td>
+</tr>
+</table>
 
 ## Features
 
 ### Browsing
 - **Home** and **Explore** laid out like deezer.com: sections, cover rows, genres, *See all*, Flow
 - **Library** sidebar: favourite tracks, playlists, albums, artists
-- **Artist pages** (top tracks, albums, related artists) and **album pages**; <kbd>a</kbd> / <kbd>e</kbd> open the artist / album of
+- **Artist pages** (Mix, top tracks, discography, similar artists, playlists, bio) and **album pages**; <kbd>a</kbd> / <kbd>e</kbd> open the artist / album of
   the focused track
 - **Search** for tracks, albums, artists and playlists, with results by category
 - Browser-like **history**: <kbd>Esc</kbd> / <kbd>PgUp</kbd> go back, <kbd>PgDn</kbd> goes forward
