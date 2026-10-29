@@ -62,7 +62,13 @@ pub async fn install(release: &Release) -> Result<()> {
     if !bytes.starts_with(b"\x7fELF") {
         bail!("downloaded asset is not a Linux binary");
     }
-    let exe = std::env::current_exe()?.canonicalize()?;
+    // Once the binary has been replaced on disk (an earlier update, a local
+    // install), /proc/self/exe reads "<path> (deleted)": update that path anyway.
+    let exe = std::env::current_exe()?;
+    let exe = match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => exe.canonicalize()?,
+    };
     let tmp = exe.with_extension("new");
     std::fs::write(&tmp, &bytes).with_context(|| format!("cannot write {}", tmp.display()))?;
     use std::os::unix::fs::PermissionsExt;

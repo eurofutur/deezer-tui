@@ -947,7 +947,7 @@ async fn run_tui_loop(
                     pending_keys.push_back((key.code, key.modifiers));
                 }
                 Event::Mouse(mouse_event) => {
-                    handle_mouse(app, &mouse_event, &mut pending_keys, &mut last_click);
+                    handle_mouse(app, &mouse_event, &mut pending_keys, &mut last_click, &update_tx);
                 }
                 Event::Resize(_, _) => {
                     // Resize often cleans up stray lines, keep that behavior explicit.
@@ -1393,18 +1393,8 @@ async fn run_tui_loop(
                                                         app.search_query.clear();
                                                     }
                                                 }
-                                                7 => match app.update.clone() {
-                                                    Some(release) => {
-                                                        app.status_message = format!("Downloading {}...", release.tag_name);
-                                                        let tx = update_tx.clone();
-                                                        tokio::spawn(async move {
-                                                            let msg = match update::install(&release).await {
-                                                                Ok(()) => format!("Status: Updated to {} - restart deezer-tui", release.tag_name),
-                                                                Err(err) => format!("Status: Update failed: {err:#}"),
-                                                            };
-                                                            let _ = tx.send(UiEvent::Error(msg));
-                                                        });
-                                                    }
+                                                7 => match app.update {
+                                                    Some(_) => start_update_install(app, &update_tx),
                                                     None => {
                                                         app.status_message = "Checking for updates...".into();
                                                         spawn_update_check(update_tx.clone(), true);
@@ -1703,10 +1693,20 @@ async fn run_tui_loop(
             match event {
                 UiEvent::UpdateChecked(release) => {
                     app.status_message = match &release {
-                        Some(r) => format!("Update {} available - Settings > Install update", r.tag_name),
+                        Some(r) => format!("Update {} available - click Update (top left)", r.tag_name),
                         None => format!("deezer-tui v{} is up to date", env!("CARGO_PKG_VERSION")),
                     };
                     app.update = release;
+                }
+                UiEvent::UpdateInstalled(result) => {
+                    app.update_installing = false;
+                    app.status_message = match result {
+                        Ok(tag) => {
+                            app.update = None;
+                            format!("Updated to {tag} - restart deezer-tui")
+                        }
+                        Err(err) => format!("Update failed: {err}"),
+                    };
                 }
                 UiEvent::HistoryLoaded(history) => {
                     apply_resume(app, &history);
@@ -2076,6 +2076,7 @@ fn handle_mouse(
     m: &MouseEvent,
     pending: &mut VecDeque<(KeyCode, KeyModifiers)>,
     last_click: &mut Option<(Instant, Hit)>,
+    update_tx: &mpsc::UnboundedSender<UiEvent>,
 ) {
     let inside = |r: ratatui::layout::Rect| {
         m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
@@ -2106,7 +2107,7 @@ fn handle_mouse(
             }
             let Some(region) = region else { return };
             match region.hit {
-                Hit::Logo | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle | Hit::NowPlaying => {}
+                Hit::Logo | Hit::UpdateButton | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle | Hit::NowPlaying => {}
                 // Title / artist inside the now-playing box: only that box lights up.
                 Hit::TrackAlbum(_) | Hit::TrackArtist(_) if app.now_playing_hover => {}
                 Hit::Focus(panel) => app.active_panel = panel,
@@ -2262,6 +2263,7 @@ fn handle_mouse(
                     let _ = save_config(&app.config);
                     app.status_message = format!("Theme: {}", app.config.theme.label());
                 }
+                Hit::UpdateButton => start_update_install(app, update_tx),
                 Hit::Focus(panel) => app.active_panel = panel,
                 Hit::SearchBar => {
                     app.active_panel = ActivePanel::Search;
@@ -3301,6 +3303,21 @@ fn config_file_path() -> AnyResult<PathBuf> {
     dirs::home_dir()
         .map(|path| path.join(".deezer-tui-config.json"))
         .ok_or_else(|| anyhow!("could not resolve the user's home directory"))
+}
+
+/// Download and install the release found by the update check (no-op while one runs).
+fn start_update_install(app: &mut App, tx: &mpsc::UnboundedSender<UiEvent>) {
+    let Some(release) = app.update.clone() else { return };
+    if app.update_installing {
+        return;
+    }
+    app.update_installing = true;
+    app.status_message = format!("Downloading {}...", release.tag_name);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = update::install(&release).await.map(|()| release.tag_name).map_err(|err| format!("{err:#}"));
+        let _ = tx.send(UiEvent::UpdateInstalled(result));
+    });
 }
 
 /// `verbose`: report "up to date" and errors (manual check); startup only reports a new release.

@@ -88,6 +88,8 @@ pub enum UiEvent {
     FavoriteArtistsLoaded(Vec<ArtistRef>),
     /// Result of an update check: Some(release) when a newer one exists.
     UpdateChecked(Option<crate::update::Release>),
+    /// Update download finished: Ok(tag) or Err(message).
+    UpdateInstalled(Result<String, String>),
 }
 
 /// Tabs of the artist page, in Deezer's order.
@@ -173,6 +175,8 @@ pub enum ViewState {
 pub enum Hit {
     /// The DEEZER wordmark: hover highlights it, click toggles Matugen / Deezer.
     Logo,
+    /// "Update" button next to the wordmark, shown when a release is newer.
+    UpdateButton,
     Focus(ActivePanel),
     SearchBar,
     NavItem(usize),
@@ -345,6 +349,8 @@ pub struct App {
     pub status_message: String,
     /// Newer GitHub release found by the update check.
     pub update: Option<crate::update::Release>,
+    /// An update download is running.
+    pub update_installing: bool,
     pub is_searching: bool,
     pub search_query: String,
     pub auto_transition_armed: bool,
@@ -467,6 +473,7 @@ impl App {
             mix_seed: None,
             status_message: "Status: Waiting...".into(),
             update: None,
+            update_installing: false,
             is_searching: false,
             search_query: String::new(),
             auto_transition_armed: false,

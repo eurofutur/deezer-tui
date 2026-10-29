@@ -34,6 +34,8 @@ pub const ARTIST_PHOTO_SLOT: usize = 2;
 /// their place on screen so moving the focus does not redraw the others.
 const FIRST_LIST_SLOT: usize = ARTIST_PHOTO_SLOT + 1;
 pub const IMAGE_SLOTS: usize = 64;
+/// Pending-update accent (Settings row, button next to the wordmark), whatever the theme.
+const UPDATE_PURPLE: Color = Color::Rgb(162, 56, 255);
 
 /// Real picture of `url` over `area`: sharpest text rendering underneath,
 /// laid over by the graphics protocol when the terminal has one.
@@ -645,16 +647,32 @@ fn render_sidebar(
     } else {
         (Style::default().fg(p.accent).add_modifier(Modifier::BOLD), bold(p))
     };
-    let logo = Paragraph::new(Line::from(vec![
-        Span::styled(" ▶ ", mark_style),
-        Span::styled("DEEZER ", text_style),
-        Span::styled(
+    let mut logo_spans = vec![Span::styled(" ▶ ", mark_style), Span::styled("DEEZER ", text_style)];
+    // A newer release replaces the theme label with an update button.
+    let update_label = match (&app.update, app.update_installing) {
+        (Some(_), true) => Some(" ⟳ Updating… "),
+        (Some(_), false) => Some(" ⬆ Update "),
+        (None, _) => None,
+    };
+    if let Some(label) = update_label {
+        logo_spans.push(Span::raw(" "));
+        logo_spans.push(Span::styled(
+            label,
+            Style::default().fg(Color::White).bg(UPDATE_PURPLE).add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        logo_spans.push(Span::styled(
             format!(" {}", if app.config.theme == Theme::Matugen { "matugen" } else { "tui" }),
             muted(p),
-        ),
-    ]));
-    f.render_widget(logo, Rect { y: logo_rect.y, height: 1, ..sidebar[0] });
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(logo_spans)), Rect { y: logo_rect.y, height: 1, ..sidebar[0] });
     hit(hits, logo_rect, Hit::Logo);
+    if let Some(label) = update_label {
+        let x = logo_rect.x + 11;
+        let width = (label.chars().count() as u16).min(sidebar[0].right().saturating_sub(x));
+        hit(hits, Rect { x, y: logo_rect.y, width, height: 1 }, Hit::UpdateButton);
+    }
 
     // Navigation: Home / Explore, then the library, then settings.
     let nav_active = app.active_panel == ActivePanel::Navigation;
@@ -1123,13 +1141,23 @@ fn render_settings(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect, p: &Pa
             None => format!("Check for updates (v{})", env!("CARGO_PKG_VERSION")),
         },
     ];
+    let update_row = items.len() - 1;
     let heights = vec![1u16; items.len()];
     let block = plain(p);
     let inner = block.inner(body);
     let list = List::new(
         items
             .into_iter()
-            .map(|s| ListItem::new(Line::from(vec![Span::raw(" "), Span::raw(s)])))
+            .enumerate()
+            .map(|(i, s)| {
+                let item = ListItem::new(Line::from(vec![Span::raw(" "), Span::raw(s)]));
+                // Pending update: the row stands out in purple.
+                if i == update_row && app.update.is_some() {
+                    item.style(Style::default().fg(UPDATE_PURPLE).add_modifier(Modifier::BOLD))
+                } else {
+                    item
+                }
+            })
             .collect::<Vec<_>>(),
     )
     .style(Style::default().fg(p.fg))
