@@ -403,6 +403,7 @@ fn sync_discord_presence(discord_rpc: &DiscordRpcHandle, app: &App) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    player::tune_allocator();
     ensure_verified_arl().await?;
 
     // Suppress noisy native audio warnings (e.g. ALSA underruns) while TUI is active.
@@ -1839,6 +1840,12 @@ async fn run_tui_loop(
                     app.is_playing = true;
                     sync_discord_presence(discord_rpc, app);
                 }
+                UiEvent::AudioOutputLost => {
+                    if let Some(now) = app.now_playing.clone() {
+                        seek_to(app, &now, now.current_ms);
+                        app.status_message = "Audio output lost, restarting on the current device".into();
+                    }
+                }
                 UiEvent::PlaybackStopped => {
                     if let Some(current_idx) = app.queue_index {
                         let next_idx = current_idx + 1;
@@ -2921,6 +2928,7 @@ async fn run_play_track_pipeline(
         receiver: &mut Option<Receiver<Vec<u8>>>,
         control_rx: &mut Option<std::sync::mpsc::Receiver<PlayerControl>>,
         event_tx: mpsc::UnboundedSender<UiEvent>,
+        size_hint: Option<usize>,
     ) -> AnyResult<()> {
         if player_thread.is_some() {
             return Ok(());
@@ -2936,9 +2944,14 @@ async fn run_play_track_pipeline(
         let handle = std::thread::spawn(move || -> AnyResult<()> {
             let streaming_player = StreamingPlayer::new()?;
             streaming_player.stop();
-            streaming_player.play_stream(stream_receiver)?;
+            streaming_player.play_stream(stream_receiver, size_hint)?;
             let mut interrupted = false;
             let mut volume = 1.0f32;
+            // Watchdog over the audio output thread, sampled every 2 s.
+            let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+            let mut watch_at = std::time::Instant::now();
+            let mut watch_ticks = streaming_player.output_cpu_ticks();
+            let mut busy_windows = 0u32;
 
             loop {
                 while let Ok(control) = control_rx.try_recv() {
@@ -2975,6 +2988,22 @@ async fn run_play_track_pipeline(
 
                 if streaming_player.is_empty() {
                     break;
+                }
+
+                let elapsed = watch_at.elapsed();
+                if elapsed >= Duration::from_secs(2) {
+                    let ticks = streaming_player.output_cpu_ticks();
+                    let used = ticks.saturating_sub(watch_ticks) as f64 / ticks_per_sec as f64;
+                    // Real playback costs ~1% here; a dead device pins a core.
+                    busy_windows = if used / elapsed.as_secs_f64() > 0.8 { busy_windows + 1 } else { 0 };
+                    watch_at = std::time::Instant::now();
+                    watch_ticks = ticks;
+                    if busy_windows >= 2 {
+                        streaming_player.stop();
+                        drop(streaming_player);
+                        let _ = event_tx.send(UiEvent::AudioOutputLost);
+                        return Ok(());
+                    }
                 }
 
                 std::thread::sleep(Duration::from_millis(100));
@@ -3020,6 +3049,7 @@ async fn run_play_track_pipeline(
 
     let mut response = client.open_signed_stream(&signed_url).await?;
     let content_length = response.content_length();
+    let size_hint = content_length.map(|len| len as usize);
     let track_key = derive_blowfish_key(&metadata.id);
     let track_duration_ms = metadata
         .duration_secs
@@ -3061,6 +3091,7 @@ async fn run_play_track_pipeline(
                     &mut receiver,
                     &mut control_rx,
                     event_tx.clone(),
+                    size_hint,
                 )?;
             }
         }
@@ -3082,6 +3113,7 @@ async fn run_play_track_pipeline(
             &mut receiver,
             &mut control_rx,
             event_tx.clone(),
+            size_hint,
         )?;
     }
 
@@ -3093,6 +3125,7 @@ async fn run_play_track_pipeline(
         join_result?;
     }
 
+    player::release_free_memory();
     Ok(())
 }
 

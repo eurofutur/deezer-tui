@@ -71,6 +71,8 @@ pub enum UiEvent {
     PlaybackPaused,
     PlaybackResumed,
     PlaybackStopped,
+    /// The audio output thread spins without playing (dead ALSA/PipeWire device).
+    AudioOutputLost,
     Error(String),
     PlaylistsLoaded(Vec<(String, String)>),
     /// Playlists the user owns (targets of "Add to playlist").

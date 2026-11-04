@@ -7,22 +7,36 @@ use rodio::{Decoder, OutputStream, Sink};
 pub struct StreamingPlayer {
     _stream: OutputStream,
     sink: Sink,
+    /// Threads spawned by the audio backend for this stream (cpal_alsa_out).
+    output_tids: Vec<String>,
 }
 
 impl StreamingPlayer {
     pub fn new() -> Result<Self> {
+        let before = thread_ids();
         let (stream, stream_handle) =
             OutputStream::try_default().context("failed to open audio output stream")?;
         let sink = Sink::try_new(&stream_handle).context("failed to create audio sink")?;
+        let output_tids = thread_ids().into_iter().filter(|t| !before.contains(t)).collect();
 
         Ok(Self {
             _stream: stream,
             sink,
+            output_tids,
         })
     }
 
-    pub fn play_stream(&self, receiver: Receiver<Vec<u8>>) -> Result<()> {
-        let stream_buffer = StreamBuffer::new(receiver);
+    /// CPU time (clock ticks) used so far by the audio output thread(s).
+    ///
+    /// cpal 0.15 never gives up on a persistent POLLERR (e.g. the Bluetooth sink
+    /// went into error): its worker loops on poll() at 100% CPU and plays nothing.
+    /// The caller samples this to notice that and rebuild the stream.
+    pub fn output_cpu_ticks(&self) -> u64 {
+        self.output_tids.iter().map(|tid| thread_cpu_ticks(tid)).sum()
+    }
+
+    pub fn play_stream(&self, receiver: Receiver<Vec<u8>>, size_hint: Option<usize>) -> Result<()> {
+        let stream_buffer = StreamBuffer::new(receiver, size_hint);
         let decoder = Decoder::new(BufReader::new(stream_buffer))
             .context("failed to create streaming audio decoder")?;
 
@@ -62,10 +76,12 @@ pub struct StreamBuffer {
 }
 
 impl StreamBuffer {
-    pub fn new(receiver: Receiver<Vec<u8>>) -> Self {
+    /// `size_hint` is the track length: reserving it once avoids the doubling
+    /// reallocations (a 35 MB FLAC used to end up in a 64 MB buffer).
+    pub fn new(receiver: Receiver<Vec<u8>>, size_hint: Option<usize>) -> Self {
         Self {
             receiver,
-            buffer: Vec::new(),
+            buffer: Vec::with_capacity(size_hint.unwrap_or(0).min(256 << 20)),
             position: 0,
             closed: false,
         }
@@ -135,5 +151,40 @@ impl Seek for StreamBuffer {
                 Ok(self.position as u64)
             }
         }
+    }
+}
+
+fn thread_ids() -> Vec<String> {
+    std::fs::read_dir("/proc/self/task")
+        .map(|dir| dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// utime + stime of one thread of this process, 0 once it is gone.
+fn thread_cpu_ticks(tid: &str) -> u64 {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat")) else {
+        return 0;
+    };
+    // Fields after "(comm) ": state is index 0, utime 11, stime 12.
+    let fields: Vec<&str> = stat.rsplit_once(") ").map(|(_, rest)| rest).unwrap_or("").split(' ').collect();
+    let field = |i: usize| fields.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    field(11) + field(12)
+}
+
+/// Give freed heap back to the kernel (glibc keeps per-thread arenas otherwise).
+pub fn release_free_memory() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// Big buffers (track data, cover PNGs) always go through mmap so that freeing
+/// them returns the memory, instead of glibc's adaptive threshold that climbs to
+/// 32 MB and leaves them fragmenting the heap for the whole session.
+pub fn tune_allocator() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20);
     }
 }
