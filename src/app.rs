@@ -415,6 +415,9 @@ pub struct App {
     /// Wallpaper palette (None until DMS has written it).
     pub matugen: Option<MatugenColors>,
     pub logo_hover: bool,
+    /// Last wheel event (time, column, row): hover must not override the
+    /// selection the wheel just moved until the pointer really moves.
+    pub last_wheel: Option<(Instant, u16, u16)>,
     /// Pointer over the now-playing box (bottom-left).
     pub now_playing_hover: bool,
     pub liked_ids: HashSet<String>,
@@ -522,6 +525,7 @@ impl App {
             image_preview: None,
             matugen: None,
             logo_hover: false,
+            last_wheel: None,
             now_playing_hover: false,
             liked_ids: HashSet::new(),
             search_hover: false,

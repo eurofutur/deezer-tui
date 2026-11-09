@@ -2131,6 +2131,16 @@ fn handle_mouse(
                 return;
             }
             let Some(region) = region else { return };
+            // Wheel debounce: right after a scroll, the list moved under a still
+            // pointer; terminals (and touchpads) still emit stray Moved events.
+            // Keep the wheel's selection until the pointer leaves the cell it was
+            // on, and ignore any move during a short window after the last notch.
+            if let Some((at, col, row)) = app.last_wheel {
+                if (m.column == col && m.row == row) || at.elapsed() < Duration::from_millis(200) {
+                    return;
+                }
+                app.last_wheel = None;
+            }
             match region.hit {
                 Hit::Logo | Hit::UpdateButton | Hit::Image(_) | Hit::MenuItem(_) | Hit::SplitCycle | Hit::NowPlaying | Hit::Like => {}
                 // Title / artist inside the now-playing box: only that box lights up.
@@ -2192,6 +2202,7 @@ fn handle_mouse(
         }
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
             let up = m.kind == MouseEventKind::ScrollUp;
+            app.last_wheel = Some((Instant::now(), m.column, m.row));
             // Wheel over the volume field: adjust the volume. Over the progress bar: seek.
             let target = app.clicks.iter().rev().find(|c| inside(c.rect)).map(|c| c.hit.clone());
             match target {
